@@ -4,7 +4,7 @@ from tqdm import tqdm
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import os
 import datetime
-from utils import parse_number, safe_get
+from utils import parse_number, safe_get, is_industry
 
 
 # 全局资金上限（单位：元）
@@ -19,10 +19,10 @@ HALF_YEAR_HIGH_SET = set()
 # 量价齐跌
 ljqd_blacklist = set()
 
+"""
+加载连续量价齐跌的黑名单股票到全局 set
+"""
 def load_ljqd_blacklist(min_days=3, min_turnover=20):
-    """
-    加载连续量价齐跌的黑名单股票到全局 set
-    """
     global ljqd_blacklist
     try:
         df = ak.stock_rank_ljqd_ths()
@@ -46,8 +46,8 @@ def load_ljqd_blacklist(min_days=3, min_turnover=20):
     except Exception as e:
         print(f"[ERROR] 加载量价齐跌黑名单失败: {e}")
 
+"""初始化半年新高股票集合，只请求一次接口"""
 def init_half_year_high():
-    """初始化半年新高股票集合，只请求一次接口"""
     global HALF_YEAR_HIGH_SET
     try:
         df = ak.stock_rank_cxg_ths(symbol="半年新高")
@@ -57,9 +57,8 @@ def init_half_year_high():
         print(f"获取半年新高数据失败: {e}")
         HALF_YEAR_HIGH_SET = set()
 
-
+"""初始化资金流和换手率缓存，只调用一次接口，缓存所有字段"""
 def init_fund_flow_cache():
-    """初始化资金流和换手率缓存，只调用一次接口，缓存所有字段"""
     global FUND_FLOW_DICT
 
     FUND_FLOW_DICT.clear()
@@ -86,8 +85,9 @@ def init_fund_flow_cache():
     except Exception as e:
         print(f"初始化资金流缓存失败: {e}")
 
-def init_quote_dict():
     """初始化全局行情缓存，每天只请求一次接口"""
+
+def init_quote_dict():
     global QUOTE_DICT
 
     today_str = pd.Timestamp.now().strftime("%Y-%m-%d")
@@ -170,9 +170,6 @@ def load_filter_lists(in_stock):
 
     return stock_list, st_codes, suspension_codes
 
-def is_tech_industry(industry: str) -> bool:
-    tech_keywords = ["科技", "半导体", "互联网", "新能源", "软件", "芯片", "AI", "通信"]
-    return any(k in industry for k in tech_keywords)
 
 def check_fundamental(code, industry):
     """用最新季度的基本面核心指标筛选股票"""
@@ -188,20 +185,18 @@ def check_fundamental(code, industry):
         debt_ratio = parse_number(safe_get(latest, "资产负债率"))
         current_ratio = parse_number(safe_get(latest, "流动比率"))
 
-        if is_tech_industry(industry):
+        if is_industry(industry, ["科技", "半导体", "互联网", "新能源", "软件", "芯片", "AI", "通信"]):
             # 科技成长股逻辑
-            if revenue_growth < 0.2:  # 营收增速要大
+            if revenue_growth < 0.1:  # 营收增速要大
                 return False
             if net_profit < 0 and net_profit_growth < 0:
                 return False  # 亏损不能扩大
-            if debt_ratio > 0.8:
+            if debt_ratio > 0.7:
                 return False
             return True
         else:
             # 传统行业逻辑
             if net_profit <= 0:
-                return False
-            if roe < 0.05:
                 return False
             if gross_margin < 0.15:
                 return False
@@ -209,11 +204,14 @@ def check_fundamental(code, industry):
                 return False
             if revenue_growth < 0.05:
                 return False
-            if debt_ratio > 0.7:
+            if debt_ratio > 0.6:
                 return False
             if current_ratio < 1:
                 return False
 
+        if roe < 0.05:
+            return False
+            
         return True
     except Exception as e:
         print(f"{code} 基本面数据异常: {e}")
@@ -232,14 +230,14 @@ def get_dynamic_turnover_threshold(free_float_mkt_cap):
 """筛选单只股票"""
 def check_stock(code, start_date, min_vol_ratio, st_codes, suspension_codes, min_turnover_rate):
 
-    # 剔除 ST / 停牌 / 军工股
+    # 剔除 ST / 停牌
     if code in st_codes or code in suspension_codes:
         return None
     
     # 排除半年新高
     if code in HALF_YEAR_HIGH_SET:
         return None
-    
+    # 排除量价齐跌
     if code in ljqd_blacklist:
         return None  
 
@@ -250,7 +248,7 @@ def check_stock(code, start_date, min_vol_ratio, st_codes, suspension_codes, min
     
     # 行业判断
     industry = get_industry_from_cache(code)
-    if industry == "国防军工":
+    if is_industry(industry, ["国防","军工","有色","金属","煤炭"]):
         return None
     
     if not check_fundamental(code, industry):
@@ -308,6 +306,33 @@ def pick_stocks_multithread(min_turnover_rate=30, start_date="2025-01-01", min_v
     return pd.DataFrame(results)
 
 
+def save_and_print_picked(picked: pd.DataFrame, prefix="picked_stocks", folder="output"):
+    """
+    打印并导出选中的股票列表
+    :param picked: DataFrame 股票数据
+    :param prefix: 文件名前缀
+    :param folder: 保存目录
+    """
+    if picked is None or picked.empty:
+        print("没有选中的股票。")
+        return
+
+    # 打印
+    print("选中的股票：")
+    print(picked)
+
+    # 文件名加日期
+    today_str = datetime.date.today().strftime("%Y%m%d")
+    filename = f"{prefix}_{today_str}.csv"
+
+    # 确保目录存在
+    os.makedirs(folder, exist_ok=True)
+    filepath = os.path.join(folder, filename)
+
+    # 导出
+    picked.to_csv(filepath, index=False, encoding="utf-8-sig")
+    print(f"已导出文件：{filepath}")
+
 if __name__ == "__main__":
     pd.set_option("display.max_rows", None)
     init_quote_dict()  # 初始化全局行情
@@ -318,5 +343,5 @@ if __name__ == "__main__":
     picked = pick_stocks_multithread(start_date="2025-08-01", min_vol_ratio=1.5, max_workers=15, strategy="b")
     picked = picked.drop_duplicates(subset="代码").reset_index(drop=True)
     picked = picked.sort_values(by="年初至今涨跌幅", ascending=True).reset_index(drop=True)
-    print("选中的股票：")
-    print(picked)
+
+    save_and_print_picked(picked)

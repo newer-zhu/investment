@@ -25,3 +25,15 @@ def safe_get(df, field):
     if val is None:
         return 0
     return val
+
+def is_industry(industry: str, keywords: list[str]) -> bool:
+    """
+    判断行业是否属于给定的关键词列表（模糊匹配）
+
+    :param industry: 行业名称（字符串）
+    :param keywords: 关键词列表，例如 ["科技", "半导体", "新能源"]
+    :return: True 如果行业名称包含任一关键词，否则 False
+    """
+    if not industry:
+        return False
+    return any(k in industry for k in keywords)

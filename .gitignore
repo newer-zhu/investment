@@ -1,0 +1,13 @@
+# 忽略 cache 文件夹
+cache/
+
+# 忽略 output 文件夹
+output/
+
+# Python 常见忽略项（推荐）
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.env
+.venv/
