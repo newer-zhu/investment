@@ -4,7 +4,7 @@ from tqdm import tqdm
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import os
 import datetime
-from utils import parse_number, safe_get, is_industry
+from utils import parse_number, safe_get, is_industry, get_latest_quarter
 
 
 # 全局资金上限（单位：元）
@@ -37,7 +37,7 @@ def load_ljqd_blacklist(min_days=3, min_turnover=20):
         df["days"] = df["days"].astype(int)
         df["turnover"] = parse_number(df["turnover"])
 
-        # 过滤条件：连续天数 ≥ min_days 且 累计换手率 ≥ min_turnover
+        # 过滤条件：连续天数 ≥ min_days 
         blacklist = df[(df["days"] >= min_days)]["code"].tolist()
 
         ljqd_blacklist = set(blacklist)
@@ -165,10 +165,13 @@ def load_filter_lists(in_stock):
         stock_list['code'].str.startswith('8')
     )
 
-    stock_list = stock_list[mask].reset_index(drop=True)
+    stock_list = stock_list[mask]
 
+    # 排除 ST 与 停牌股票
+    excluded_codes = st_codes | suspension_codes
+    stock_list = stock_list[~stock_list['code'].isin(excluded_codes)].reset_index(drop=True)
 
-    return stock_list, st_codes, suspension_codes
+    return stock_list
 
 
 def check_fundamental(code, industry):
@@ -227,13 +230,9 @@ def get_dynamic_turnover_threshold(free_float_mkt_cap):
     else:  # 大盘
         return 0.03
 
+  
 """筛选单只股票"""
-def check_stock(code, start_date, min_vol_ratio, st_codes, suspension_codes, min_turnover_rate):
-
-    # 剔除 ST / 停牌
-    if code in st_codes or code in suspension_codes:
-        return None
-    
+def check_stock(code, start_date, min_vol_ratio):
     # 排除半年新高
     if code in HALF_YEAR_HIGH_SET:
         return None
@@ -254,6 +253,7 @@ def check_stock(code, start_date, min_vol_ratio, st_codes, suspension_codes, min
     if not check_fundamental(code, industry):
         return None
 
+    
     price = row["最新价"]
     turnover_rate = row["换手率"]
 
@@ -283,16 +283,15 @@ def check_stock(code, start_date, min_vol_ratio, st_codes, suspension_codes, min
     }
 
 """多线程选股"""
-def pick_stocks_multithread(min_turnover_rate=30, start_date="2025-01-01", min_vol_ratio=1.5, max_workers=20, strategy="a"):
-    stock_list, st_codes, suspension_codes = load_filter_lists(strategy)
+def pick_stocks_multithread(start_date="2025-01-01", min_vol_ratio=1.5, max_workers=20, strategy="a"):
+    stock_list = load_filter_lists(strategy)
     results = []
 
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = [
             executor.submit(
                 check_stock, code,
-                start_date, min_vol_ratio,
-                st_codes, suspension_codes, min_turnover_rate
+                start_date, min_vol_ratio
             )
             for code in stock_list['code'].tolist()
         ]
@@ -345,3 +344,5 @@ if __name__ == "__main__":
     picked = picked.sort_values(by="年初至今涨跌幅", ascending=True).reset_index(drop=True)
 
     save_and_print_picked(picked)
+    
+    
