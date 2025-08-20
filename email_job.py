@@ -2,6 +2,7 @@ import os
 import time
 import datetime
 import configparser
+import schedule
 import pandas as pd
 from utils import send_email
 
@@ -93,22 +94,20 @@ def is_weekday(dt: datetime.datetime | None = None) -> bool:
     return dt.weekday() < 5  # 0=Mon ... 4=Fri
 
 
+def schedule_jobs():
+    """Register weekday 22:00 jobs using schedule."""
+    schedule.clear()
+    schedule.every().monday.at("22:00").do(send_daily_report)
+    schedule.every().tuesday.at("22:00").do(send_daily_report)
+    schedule.every().wednesday.at("22:00").do(send_daily_report)
+    schedule.every().thursday.at("22:00").do(send_daily_report)
+    schedule.every().friday.at("22:00").do(send_daily_report)
+
+
 def run_timer():
-    """Run a simple weekday 22:00 timer loop."""
-    last_sent_date: datetime.date | None = None
+    schedule_jobs()
     while True:
-        now = datetime.datetime.now()
-        if is_weekday(now) and now.hour == 22 and now.minute == 0:
-            if last_sent_date != now.date():
-                try:
-                    send_daily_report()
-                except Exception as e:
-                    print("发送失败:", e)
-                last_sent_date = now.date()
-                # Avoid re-sending within the same minute
-                time.sleep(65)
-                continue
-        # Check roughly every 20 seconds
+        schedule.run_pending()
         time.sleep(20)
 
 
