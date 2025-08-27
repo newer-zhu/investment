@@ -4,11 +4,11 @@ from tqdm import tqdm
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import os
 import datetime
-from utils import parse_number, safe_get, is_industry, get_latest_quarter
+from utils import parse_number, safe_get, is_industry, get_latest_quarter, load_config_from_ini
 
 
 # 全局资金上限（单位：元）
-MAX_FUNDS = 20000
+MAX_FUNDS = float(load_config_from_ini("strategy").get("max_funds", 20000))
 # 股票行业信息
 INFO_CACHE = {}  
 # 资金流和换手率缓存
@@ -18,6 +18,7 @@ QUOTE_DICT = {}
 HALF_YEAR_HIGH_SET = set()
 # 量价齐跌
 ljqd_blacklist = set()
+
 
 """
 加载连续量价齐跌的黑名单股票到全局 set
@@ -46,15 +47,15 @@ def load_ljqd_blacklist(min_days=3, min_turnover=20):
     except Exception as e:
         print(f"[ERROR] 加载量价齐跌黑名单失败: {e}")
 
-"""初始化半年新高股票集合，只请求一次接口"""
-def init_half_year_high():
+"""初始化新高股票集合，只请求一次接口"""
+def init_half_year_high(symbol: str = "一年新高"):
     global HALF_YEAR_HIGH_SET
     try:
-        df = ak.stock_rank_cxg_ths(symbol="半年新高")
+        df = ak.stock_rank_cxg_ths(symbol=symbol)
         HALF_YEAR_HIGH_SET = set(df["股票代码"].astype(str).tolist())
-        print(f"半年新高股票数量: {len(HALF_YEAR_HIGH_SET)}")
+        print(f"{symbol} 股票数量: {len(HALF_YEAR_HIGH_SET)}")
     except Exception as e:
-        print(f"获取半年新高数据失败: {e}")
+        print(f"获取 {symbol} 数据失败: {e}")
         HALF_YEAR_HIGH_SET = set()
 
 """初始化资金流和换手率缓存，只调用一次接口，缓存所有字段"""
@@ -129,19 +130,14 @@ def get_industry_from_cache(code):
     return industry
 
 # 突破上涨的股票
-def load_up_trend_stocks(option="10日均线"):
+def load_up_trend_stocks(option="60日均线"):
     df = ak.stock_rank_xstp_ths(symbol = option)
     df = df.rename(columns={"股票代码": "code"})
     return df[['code']]
 
 def load_filter_lists(in_stock):
-    """加载 ST 股、停牌股、军工股列表"""
-    if in_stock == "a":
-        # 所有 A 股
-        stock_list = ak.stock_info_a_code_name()
-    elif in_stock == "b":
-        # 向上突破A股
-        stock_list = load_up_trend_stocks()
+    # 向上突破A股
+    stock_list = load_up_trend_stocks()
     
     # ST 股列表
     try:
@@ -226,7 +222,7 @@ def get_dynamic_turnover_threshold(free_float_mkt_cap):
     if free_float_mkt_cap <= 50e8:  # 小盘
         return 0.15
     elif free_float_mkt_cap <= 200e8:  # 中盘
-        return 0.07
+        return 0.08
     else:  # 大盘
         return 0.03
 
@@ -247,7 +243,7 @@ def check_stock(code, start_date, min_vol_ratio):
     
     # 行业判断
     industry = get_industry_from_cache(code)
-    if is_industry(industry, ["国防","军工","有色","金属","煤炭"]):
+    if is_industry(industry, ["国防","军工","有色","金属","煤炭","钢铁"]):
         return None
     
     if not check_fundamental(code, industry):
@@ -269,7 +265,7 @@ def check_stock(code, start_date, min_vol_ratio):
     free_float_mkt_cap = row.get("流通市值", 0)
     dynamic_thr = get_dynamic_turnover_threshold(free_float_mkt_cap)
     fund_data = FUND_FLOW_DICT.get(code, {})
-    if fund_data.get("连续换手率", 0) < dynamic_thr:
+    if fund_data.get("连续换手率", 0) < dynamic_thr or turnover_rate < dynamic_thr:
         return None
 
     return {

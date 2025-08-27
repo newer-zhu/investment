@@ -4,38 +4,18 @@ import datetime
 import configparser
 import schedule
 import pandas as pd
-from utils import send_email
+from utils import send_email, load_config_from_ini
 
 # Configuration (config.ini overrides env)
 CONFIG_PATH = os.getenv("EMAIL_JOB_CONFIG", "config.ini")
 
 
-def load_config_from_ini(path: str) -> dict:
-    values: dict[str, str] = {}
-    if not os.path.exists(path):
-        return values
-    parser = configparser.ConfigParser()
-    parser.read(path, encoding="utf-8")
-    section = "email"
-    if not parser.has_section(section):
-        return values
-    get = lambda key, fb=None: parser.get(section, key, fallback=fb)
-    values.update({
-        "TO_EMAIL": get("to_email"),
-        "FROM_EMAIL": get("from_email"),
-        "FROM_PASSWORD": get("from_password"),
-        "SMTP_SERVER": get("smtp_server"),
-        "SMTP_PORT": get("smtp_port"),
-    })
-    return {k: v for k, v in values.items() if v is not None and v != ""}
-
-
-_file_cfg = load_config_from_ini(CONFIG_PATH)
-TO_EMAIL = _file_cfg.get("TO_EMAIL", os.getenv("TO_EMAIL", "1713622254@qq.com"))
-FROM_EMAIL = _file_cfg.get("FROM_EMAIL", os.getenv("FROM_EMAIL", "1713622254@qq.com"))
-FROM_PASSWORD = _file_cfg.get("FROM_PASSWORD", os.getenv("FROM_PASSWORD", "xjahgydqxuqtbjac"))
-SMTP_SERVER = _file_cfg.get("SMTP_SERVER", os.getenv("SMTP_SERVER", "smtp.qq.com"))
-SMTP_PORT = int(_file_cfg.get("SMTP_PORT", os.getenv("SMTP_PORT", "587")))
+_email_cfg = load_config_from_ini("email", CONFIG_PATH)
+TO_EMAIL = _email_cfg.get("to_email", os.getenv("TO_EMAIL", "1713622254@qq.com"))
+FROM_EMAIL = _email_cfg.get("from_email", os.getenv("FROM_EMAIL", "1713622254@qq.com"))
+FROM_PASSWORD = _email_cfg.get("from_password", os.getenv("FROM_PASSWORD", "xjahgydqxuqtbjac"))
+SMTP_SERVER = _email_cfg.get("smtp_server", os.getenv("SMTP_SERVER", "smtp.qq.com"))
+SMTP_PORT = int(_email_cfg.get("smtp_port", os.getenv("SMTP_PORT", "587")))
 
 OUTPUT_FOLDER = "output"
 FILENAME_PREFIX = "picked_stocks"

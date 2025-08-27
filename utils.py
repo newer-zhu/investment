@@ -1,8 +1,29 @@
 # utils.py
 import smtplib
+import os
+import configparser
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from email.header import Header
+
+def load_config_from_ini(section: str,
+                         path: str | None = None,
+                         config_path_env: str = "EMAIL_JOB_CONFIG",
+                         default_path: str = "config.ini") -> dict:
+    """
+    通用的 INI 配置读取函数，返回指定 section 下的键值字典（去除空值）。
+    优先级：显式 path > 环境变量 EMAIL_JOB_CONFIG > 默认 config.ini
+    """
+    if path is None:
+        path = os.getenv(config_path_env, default_path)
+    if not os.path.exists(path):
+        return {}
+    parser = configparser.ConfigParser()
+    parser.read(path, encoding="utf-8")
+    if not parser.has_section(section):
+        return {}
+    values = {k: v for k, v in parser.items(section) if v is not None and v != ""}
+    return values
 
 def send_email(subject: str, body: str, to_email: str,
                from_email: str, from_password: str,
