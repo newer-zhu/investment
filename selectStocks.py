@@ -185,30 +185,32 @@ def check_fundamental(code, industry):
         current_ratio = parse_number(safe_get(latest, "流动比率"))
 
         if is_industry(industry, ["科技", "半导体", "互联网", "新能源", "软件", "芯片", "AI", "通信"]):
-            # 科技成长股逻辑
-            if revenue_growth < 0.1:  # 营收增速要大
+            # 科技成长股逻辑（牛市版）
+            if revenue_growth < 0.05:  # 营收增速放宽到 5%
                 return False
-            if net_profit < 0 and net_profit_growth < 0:
-                return False  # 亏损不能扩大
-            if debt_ratio > 0.7:
-                return False
+            if net_profit < 0 and net_profit_growth < -0.1:  
+                return False  # 亏损可以接受，但不能大幅恶化
+            if debt_ratio > 0.8:  
+                return False  # 牛市容忍更高杠杆
             return True
         else:
-            # 传统行业逻辑
+            # 传统行业逻辑（牛市版）
             if net_profit <= 0:
-                return False
-            if gross_margin < 0.15:
-                return False
-            if net_profit_growth < 0.05:
-                return False
-            if revenue_growth < 0.05:
-                return False
-            if debt_ratio > 0.6:
-                return False
-            if current_ratio < 1:
-                return False
+                return False  # 传统行业最好还是要赚钱
+            if gross_margin < 0.1:  
+                return False  # 放宽毛利率
+            if net_profit_growth < 0:  
+                return False  # 牛市可以接受持平，但不接受下降
+            if revenue_growth < 0.02:  
+                return False  # 营收至少正增长
+            if debt_ratio > 0.7:  
+                return False  # 传统行业不建议太高杠杆
+            if current_ratio < 0.8:  
+                return False  # 放宽流动比率
+            return True
 
-        if roe < 0.05:
+
+        if roe < 0.03:
             return False
             
         return True
@@ -265,7 +267,7 @@ def check_stock(code, start_date, min_vol_ratio):
     free_float_mkt_cap = row.get("流通市值", 0)
     dynamic_thr = get_dynamic_turnover_threshold(free_float_mkt_cap)
     fund_data = FUND_FLOW_DICT.get(code, {})
-    if fund_data.get("连续换手率", 0) < dynamic_thr or turnover_rate < dynamic_thr:
+    if fund_data.get("连续换手率", 0) < dynamic_thr*3 or turnover_rate < dynamic_thr:
         return None
 
     return {

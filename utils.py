@@ -27,7 +27,8 @@ def load_config_from_ini(section: str,
 
 def send_email(subject: str, body: str, to_email: str,
                from_email: str, from_password: str,
-               smtp_server: str = "smtp.gmail.com", smtp_port: int = 587):
+               smtp_server: str = "smtp.gmail.com", smtp_port: int = 587,
+               content_type: str = "plain"):
     """
     发送邮件通知
 
@@ -46,8 +47,9 @@ def send_email(subject: str, body: str, to_email: str,
         message['To'] = to_email
         message['Subject'] = Header(subject, 'utf-8')
         
-        # 添加正文
-        message.attach(MIMEText(body, 'plain', 'utf-8'))
+        # 添加正文（plain 或 html）
+        subtype = 'html' if content_type.lower() == 'html' else 'plain'
+        message.attach(MIMEText(body, subtype, 'utf-8'))
         
         # 连接 SMTP
         server = smtplib.SMTP(smtp_server, smtp_port)
@@ -58,10 +60,10 @@ def send_email(subject: str, body: str, to_email: str,
         server.sendmail(from_email, [to_email], message.as_string())
         server.quit()
         
-        print("邮件发送成功！")
+        print(f"邮件发送成功：{from_email} -> {to_email}")
 
     except Exception as e:
-        print("邮件发送失败：", e)
+        print(f"邮件发送失败：{from_email} -> {to_email}: {e}")
 
 def parse_number(s):
     if s is None:
