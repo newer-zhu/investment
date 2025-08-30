@@ -48,7 +48,7 @@ def load_ljqd_blacklist(min_days=3, min_turnover=20):
         print(f"[ERROR] 加载量价齐跌黑名单失败: {e}")
 
 """初始化新高股票集合，只请求一次接口"""
-def init_half_year_high(symbol: str = "一年新高"):
+def init_half_year_high(symbol: str = "历史新高"):
     global HALF_YEAR_HIGH_SET
     try:
         df = ak.stock_rank_cxg_ths(symbol=symbol)
@@ -210,7 +210,7 @@ def check_fundamental(code, industry):
             return True
 
 
-        if roe < 0.03:
+        if roe < 0.05:
             return False
             
         return True
@@ -231,7 +231,7 @@ def get_dynamic_turnover_threshold(free_float_mkt_cap):
   
 """筛选单只股票"""
 def check_stock(code, start_date, min_vol_ratio):
-    # 排除半年新高
+    # 排除新高
     if code in HALF_YEAR_HIGH_SET:
         return None
     # 排除量价齐跌
@@ -256,7 +256,7 @@ def check_stock(code, start_date, min_vol_ratio):
     turnover_rate = row["换手率"]
 
     # 资金判断
-    if price * 100 > MAX_FUNDS/2 or price < 5 or price > 30:  # 超出资金限制
+    if price * 100 > MAX_FUNDS/2 or price < 5 :  # 超出资金限制
         return None
     
     # 成交额过滤

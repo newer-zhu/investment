@@ -2,9 +2,12 @@ import os
 import time
 import datetime
 import configparser
+import subprocess
+import sys
 import schedule
 import pandas as pd
 from utils import send_email, load_config_from_ini
+from analyze_stocks import get_prev_portfolio_avg_message
 
 # Configuration (config.ini overrides env)
 CONFIG_PATH = os.getenv("EMAIL_JOB_CONFIG", "config.ini")
@@ -74,14 +77,27 @@ def csv_to_html_table(path: str) -> str:
 
 
 def send_daily_report():
+    # 先执行选股与分析脚本，生成并筛选 CSV
+    try:
+        subprocess.run([sys.executable, os.path.join(os.path.dirname(__file__), "selectStocks.py")],
+                       check=True)
+        subprocess.run([sys.executable, os.path.join(os.path.dirname(__file__), "analyze_stocks.py")],
+                       check=True)
+    except Exception as e:
+        print(f"执行选股/分析脚本失败: {e}")
+
     csv_path = find_csv_for_today_or_latest()
+    prev_msg = get_prev_portfolio_avg_message()
     if not csv_path:
-        body = "未找到导出的选股文件。请先运行选股脚本生成 CSV。"
+        intro = "未找到导出的选股文件。请先运行选股脚本生成 CSV。"
+        second = f"<p>{prev_msg}</p>" if prev_msg else ""
+        body = f"<p>{intro}</p>{second}"
     else:
         table_html = csv_to_html_table(csv_path)
-        body = f"<p>今日选股建议（建议持有3~5天）: 纯属个人项目，不构成任何投资建议</p>{table_html}"
+        second = f"<p>{prev_msg}</p>" if prev_msg else ""
+        body = f"<p>今日选股建议（建议持有3~5天）: 纯属个人项目，不构成任何投资建议</p>{second}{table_html}"
 
-    subject = f"洪多量化选股提醒 {datetime.date.today().isoformat()}"
+    subject = f"红多量化选股提醒 {datetime.date.today().isoformat()}"
     # 单一发件人，多个收件人
     for recipient in TO_EMAILS:
         try:
@@ -109,11 +125,11 @@ def is_weekday(dt: datetime.datetime | None = None) -> bool:
 def schedule_jobs():
     """Register weekday 22:00 jobs using schedule."""
     schedule.clear()
-    schedule.every().monday.at("15:30").do(send_daily_report)
-    schedule.every().tuesday.at("15:30").do(send_daily_report)
-    schedule.every().wednesday.at("15:30").do(send_daily_report)
-    schedule.every().thursday.at("15:30").do(send_daily_report)
-    schedule.every().friday.at("15:30").do(send_daily_report)
+    schedule.every().monday.at("18:40").do(send_daily_report)
+    schedule.every().tuesday.at("18:40").do(send_daily_report)
+    schedule.every().wednesday.at("18:40").do(send_daily_report)
+    schedule.every().thursday.at("18:40").do(send_daily_report)
+    schedule.every().friday.at("18:40").do(send_daily_report)
 
 
 def run_timer():
