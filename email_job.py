@@ -53,13 +53,15 @@ def find_csv_for_today_or_latest() -> str | None:
 
 def csv_to_html_table(path: str) -> str:
     df = pd.read_csv(path)
+       # 只保留前 10 行
+    df = df.head(10)
     if df.empty:
         return "<p>文件存在，但没有选中的股票。</p>"
     # 仅展示常用列并确保代码是字符串，便于复制
-    preferred_cols = ["代码", "名称", "价格", "今日涨跌", "总市值", "年初至今涨跌幅", "行业"]
-    show_cols = [c for c in preferred_cols if c in df.columns]
-    if show_cols:
-        df = df[show_cols]
+    # preferred_cols = ["代码", "名称", "价格", "今日涨跌", "总市值", "年初至今涨跌幅", "行业"]
+    # show_cols = [c for c in preferred_cols if c in df.columns]
+    # if show_cols:
+    #     df = df[show_cols]
     if "代码" in df.columns:
         df["代码"] = df["代码"].astype(str)
 
@@ -80,8 +82,6 @@ def send_daily_report():
     # 先执行选股与分析脚本，生成并筛选 CSV
     try:
         subprocess.run([sys.executable, os.path.join(os.path.dirname(__file__), "selectStocks.py")],
-                       check=True)
-        subprocess.run([sys.executable, os.path.join(os.path.dirname(__file__), "analyze_stocks.py")],
                        check=True)
     except Exception as e:
         print(f"执行选股/分析脚本失败: {e}")
