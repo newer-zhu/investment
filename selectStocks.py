@@ -148,71 +148,6 @@ def load_up_trend_stocks(option="30日均线"):
     df = df.rename(columns={"股票代码": "code"})
     return df[['code']]
 
-# 初步过滤
-# def load_filter_lists(in_stock):
-    # 向上突破A股
-    stock_list = load_up_trend_stocks()
-    
-    # ST 股列表
-    try:
-        st_df = ak.stock_zh_a_st_em()
-        st_codes = set(st_df['代码'].tolist())
-    except Exception as e:
-        st_codes = set()
-
-    # 停牌股票
-    try:
-        suspend_df = ak.news_trade_notify_suspend_baidu()
-        suspension_codes = set(suspend_df['股票代码'].tolist())
-    except Exception as e:
-        suspension_codes = set()
-
-    # 直接剔除的股票
-    mask = ~(
-        stock_list['code'].str.startswith('300') |
-        stock_list['code'].str.startswith('301') |
-        stock_list['code'].str.startswith('688') |
-        stock_list['code'].str.startswith('8')
-    )
-    stock_list = stock_list[mask]
-
-    # 排除 ST、停牌、历史新高、量价齐跌 黑名单股票
-    excluded_codes = (
-        set(map(str, st_codes))
-        | set(map(str, suspension_codes))
-        | set(map(str, HALF_YEAR_HIGH_SET))
-        | set(map(str, ljqd_blacklist))
-    )
-    stock_list = stock_list[~stock_list['code'].isin(excluded_codes)].reset_index(drop=True)
-
-    # 价格与成交额等基础资金约束过滤（依赖 QUOTE_DICT）
-    def _basic_fund_filter(code: str) -> bool:
-        row = QUOTE_DICT.get(code)
-        if not row:
-            return False
-        price = row.get("最新价", 0)
-        turnover = row.get("成交额", 0)
-        # 单手100股成本不超过 MAX_FUNDS/2，且单价不低于5元；成交额不低于5000万
-        if price * 100 > MAX_FUNDS / 2:
-            return False
-        if price < 5:
-                return False
-        if turnover < 50_000_000:
-            return False
-        return True
-
-    keep_codes = [code for code in stock_list['code'].tolist() if _basic_fund_filter(code)]
-
-    # 行业黑名单过滤
-    industry_blacklist = ["国防", "军工", "有色", "金属", "煤炭", "钢铁"]
-    def _industry_ok(code: str) -> bool:
-        industry = get_industry_from_cache(code)
-        return not is_industry(industry, industry_blacklist)
-
-    keep_codes = [code for code in stock_list['code'].tolist() if _industry_ok(code)]
-    stock_list = pd.DataFrame({"code": keep_codes})
-
-    return stock_list
 
 def load_filter_lists(in_stock):
     # 向上突破A股
@@ -250,7 +185,7 @@ def load_filter_lists(in_stock):
 
     # 资金条件过滤
     stock_list = stock_list[
-        (stock_list["最新价"] * 100 <= MAX_FUNDS / 2)
+        (stock_list["最新价"] * 100 <= MAX_FUNDS / 3)
         & (stock_list["最新价"] >= 5)
         & (stock_list["成交额"] >= 50_000_000)
     ]

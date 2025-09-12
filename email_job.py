@@ -6,7 +6,7 @@ import subprocess
 import sys
 import schedule
 import pandas as pd
-from utils import send_email, load_config_from_ini
+from utils import send_email, load_config_from_ini, find_csv_for_today_or_latest, csv_to_html_table
 from analyze_stocks import get_prev_portfolio_avg_message
 
 # Configuration (config.ini overrides env)
@@ -27,56 +27,26 @@ FROM_PASSWORDS = [p.strip() for p in _email_cfg.get("from_passwords", "").split(
 # 支持多个收件人：to_emails 为逗号分隔
 TO_EMAILS = [e.strip() for e in _email_cfg.get("to_emails", "").split(",") if e.strip()] or [TO_EMAIL]
 
-OUTPUT_FOLDER = "output"
-FILENAME_PREFIX = "picked_stocks"
+def send_late_suggestion(table_html):
 
+    body = f"<p>今日尾盘选股建议（次日早盘卖出）: 注意止损！！！</p>{table_html}"
 
-def find_csv_for_today_or_latest() -> str | None:
-    """Return today's CSV path if it exists; otherwise the most recent matching CSV; else None."""
-    today_name = f"{FILENAME_PREFIX}_{datetime.date.today().strftime('%Y%m%d')}.csv"
-    today_path = os.path.join(OUTPUT_FOLDER, today_name)
-    if os.path.exists(today_path):
-        return today_path
+    subject = f"红多量化-尾盘提醒 {datetime.date.today().isoformat()}"
 
-    if not os.path.isdir(OUTPUT_FOLDER):
-        return None
-
-    candidates = [
-        os.path.join(OUTPUT_FOLDER, f)
-        for f in os.listdir(OUTPUT_FOLDER)
-        if f.startswith(FILENAME_PREFIX) and f.endswith(".csv")
-    ]
-    if not candidates:
-        return None
-    return max(candidates, key=os.path.getmtime)
-
-
-def csv_to_html_table(path: str) -> str:
-    df = pd.read_csv(path)
-       # 只保留前 10 行
-    df = df.head(10)
-    if df.empty:
-        return "<p>文件存在，但没有选中的股票。</p>"
-    # 仅展示常用列并确保代码是字符串，便于复制
-    # preferred_cols = ["代码", "名称", "价格", "今日涨跌", "总市值", "年初至今涨跌幅", "行业"]
-    # show_cols = [c for c in preferred_cols if c in df.columns]
-    # if show_cols:
-    #     df = df[show_cols]
-    if "代码" in df.columns:
-        df["代码"] = df["代码"].astype(str)
-
-    # 转为 HTML 表格，居中显示，便于复制
-    table_html = df.to_html(index=False, border=0, escape=False)
-    style = """
-    <style>
-      table { border-collapse: collapse; width: 100%; }
-      th, td { border: 1px solid #e5e7eb; padding: 8px 10px; text-align: center; font-family: Arial, Helvetica, sans-serif; font-size: 13px; }
-      th { background: #f3f4f6; }
-      td:first-child { font-family: Consolas, 'Courier New', monospace; }
-    </style>
-    """
-    return style + table_html
-
+    try:
+        send_email(
+            subject=subject,
+            body=body,
+            to_email=TO_EMAIL,
+            from_email=FROM_EMAIL,
+            from_password=FROM_PASSWORD,
+            smtp_server=SMTP_SERVER,
+            smtp_port=SMTP_PORT,
+            content_type='html',
+        )
+        time.sleep(1)
+    except Exception as e:
+        print(f"发送失败: from {FROM_EMAIL} -> {TO_EMAIL}: {e}")
 
 def send_daily_report():
     # 先执行选股与分析脚本，生成并筛选 CSV
@@ -146,10 +116,6 @@ def send_daily_report_test():
             print(f"发送失败: from {FROM_EMAIL} -> {recipient}: {e}")
 
 
-def is_weekday(dt: datetime.datetime | None = None) -> bool:
-    if dt is None:
-        dt = datetime.datetime.now()
-    return dt.weekday() < 5  # 0=Mon ... 4=Fri
 
 
 def schedule_jobs():

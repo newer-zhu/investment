@@ -1,10 +1,19 @@
 # utils.py
-import smtplib
+# utils.py
 import os
+import smtplib
 import configparser
+import datetime
+
+import pandas as pd
+import holidays
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from email.header import Header
+
+
+OUTPUT_FOLDER = "output"
+FILENAME_PREFIX = "picked_stocks"
 
 def load_config_from_ini(section: str,
                          path: str | None = None,
@@ -24,6 +33,50 @@ def load_config_from_ini(section: str,
         return {}
     values = {k: v for k, v in parser.items(section) if v is not None and v != ""}
     return values
+
+import pandas as pd
+
+def selected_stocks_to_html(selected_stocks: list[dict]) -> str:
+    """
+    将 selected_stocks 列表（英文字段）转成 HTML 表格
+    :param selected_stocks: list of dict
+    :return: HTML 字符串
+    """
+    if not selected_stocks:
+        return "<p>No stock matched the conditions.</p>"
+    
+    df = pd.DataFrame(selected_stocks)
+    
+    # 显示列和顺序（对应你的英文字段）
+    show_cols = [
+        "code", "name", "pct_change", "turnover", "volume_ratio", 
+        "circulating_value", "amount", "amplitude", "speed", 
+        "five_min_change", "sixty_day_change", "pe_ratio", "pb_ratio", 
+        "fundamental_score", "technical_score", "total_score"
+    ]
+    df = df[[c for c in show_cols if c in df.columns]]
+    
+    # 格式化金额列（以亿为单位）
+    if "amount" in df.columns:
+        df["amount"] = df["amount"].apply(lambda x: f"{x/1e8:.2f}B")
+    if "circulating_value" in df.columns:
+        df["circulating_value"] = df["circulating_value"].apply(lambda x: f"{x/1e8:.2f}B")
+    
+    # 转成 HTML
+    table_html = df.to_html(index=False, border=0, escape=False)
+    
+    # 添加样式
+    style = """
+    <style>
+      table { border-collapse: collapse; width: 100%; }
+      th, td { border: 1px solid #e5e7eb; padding: 6px 10px; text-align: center; font-family: Arial, Helvetica, sans-serif; font-size: 13px; }
+      th { background: #f3f4f6; }
+      td:first-child { font-family: Consolas, 'Courier New', monospace; }
+    </style>
+    """
+    return style + table_html
+
+
 
 def send_email(subject: str, body: str, to_email: str,
                from_email: str, from_password: str,
@@ -103,8 +156,19 @@ def is_industry(industry: str, keywords: list[str]) -> bool:
         return False
     return any(k in industry for k in keywords)
 
-
-import datetime
+def format_symbol(code: str) -> str:
+    """
+    将纯数字证券代码转换成雪球接口要求的格式
+    :param code: 纯数字证券代码，例如 "600000", "000001", "300750"
+    :return: 格式化后的 symbol，例如 "SH600000", "SZ000001", "SZ300750"
+    """
+    code = str(code).zfill(6)  # 保证6位
+    if code.startswith(("60", "68")):  # 沪市主板 & 科创板
+        return f"SH{code}"
+    elif code.startswith(("00", "30")):  # 深市主板 & 创业板
+        return f"SZ{code}"
+    else:
+        raise ValueError(f"未知代码前缀: {code}")
 
 def get_latest_quarter() -> str:
     """
@@ -128,3 +192,66 @@ def get_latest_quarter() -> str:
     else:  
         # 11月以后 → 三季报能查
         return f"{year}3"
+
+def is_trading_day(date=None):
+    """判断给定日期是否为交易日"""
+    if date is None:
+        date = datetime.date.today()
+    
+    # 首先判断是否为周末
+    if date.weekday() >= 5:  # 5是周六，6是周日
+        return False
+    
+    # 判断是否为节假日（这里使用中国节假日）
+    cn_holidays = holidays.China()
+    if date in cn_holidays:
+        return False
+    
+    return True
+
+
+def find_csv_for_today_or_latest() -> str | None:
+    """Return today's CSV path if it exists; otherwise the most recent matching CSV; else None."""
+    today_name = f"{FILENAME_PREFIX}_{datetime.date.today().strftime('%Y%m%d')}.csv"
+    today_path = os.path.join(OUTPUT_FOLDER, today_name)
+    if os.path.exists(today_path):
+        return today_path
+
+    if not os.path.isdir(OUTPUT_FOLDER):
+        return None
+
+    candidates = [
+        os.path.join(OUTPUT_FOLDER, f)
+        for f in os.listdir(OUTPUT_FOLDER)
+        if f.startswith(FILENAME_PREFIX) and f.endswith(".csv")
+    ]
+    if not candidates:
+        return None
+    return max(candidates, key=os.path.getmtime)
+
+
+def csv_to_html_table(path: str) -> str:
+    df = pd.read_csv(path)
+       # 只保留前 10 行
+    df = df.head(10)
+    if df.empty:
+        return "<p>文件存在，但没有选中的股票。</p>"
+    # 仅展示常用列并确保代码是字符串，便于复制
+    # preferred_cols = ["代码", "名称", "价格", "今日涨跌", "总市值", "年初至今涨跌幅", "行业"]
+    # show_cols = [c for c in preferred_cols if c in df.columns]
+    # if show_cols:
+    #     df = df[show_cols]
+    if "代码" in df.columns:
+        df["代码"] = df["代码"].astype(str)
+
+    # 转为 HTML 表格，居中显示，便于复制
+    table_html = df.to_html(index=False, border=0, escape=False)
+    style = """
+    <style>
+      table { border-collapse: collapse; width: 100%; }
+      th, td { border: 1px solid #e5e7eb; padding: 8px 10px; text-align: center; font-family: Arial, Helvetica, sans-serif; font-size: 13px; }
+      th { background: #f3f4f6; }
+      td:first-child { font-family: Consolas, 'Courier New', monospace; }
+    </style>
+    """
+    return style + table_html
