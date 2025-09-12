@@ -104,7 +104,7 @@ def get_prev_portfolio_avg_message() -> str:
     if not prev_path or not os.path.exists(today_cache_path):
         return ""
     try:
-        prev_df = pd.read_csv(prev_path)
+        prev_df = pd.read_csv(prev_path).head(10)  # ✅ 只保留前10行
         cache_df = pd.read_csv(today_cache_path, dtype={"代码": str})
     except Exception:
         return ""
