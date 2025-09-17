@@ -4,10 +4,12 @@ import datetime
 import configparser
 import subprocess
 import sys
+import threading
 import schedule
 import pandas as pd
-from utils import send_email, load_config_from_ini, find_csv_for_today_or_latest, csv_to_html_table
+from utils import is_trading_day,send_email, load_config_from_ini, find_csv_for_today_or_latest, selected_stocks_to_html,csv_to_html_table
 from analyze_stocks import get_prev_portfolio_avg_message
+import akshare as ak
 
 # Configuration (config.ini overrides env)
 CONFIG_PATH = os.getenv("EMAIL_JOB_CONFIG", "config.ini")
@@ -26,6 +28,141 @@ FROM_PASSWORDS = [p.strip() for p in _email_cfg.get("from_passwords", "").split(
 
 # 支持多个收件人：to_emails 为逗号分隔
 TO_EMAILS = [e.strip() for e in _email_cfg.get("to_emails", "").split(",") if e.strip()] or [TO_EMAIL]
+
+# Stock list
+stocks = {}
+
+def get_stock_info(symbol: str) -> dict:
+    """
+    Get detailed stock info (using Snowball interface)
+    :param symbol: stock code, e.g., "SH600000"
+    :return: dict {item: value}
+    """
+    df = ak.stock_individual_spot_xq(symbol=symbol)
+    info = dict(zip(df["item"], df["value"]))
+    return info
+
+def init_stocks():
+    """Load stock CSV from today or latest available"""
+    csv_path = find_csv_for_today_or_latest()
+    now = datetime.datetime.now()
+    print(f"[{now.strftime('%Y-%m-%d %H:%M:%S')}] Reading stock file: {csv_path}")
+    
+    global stocks
+    stocks = pd.read_csv(csv_path)
+    print(f"[{now.strftime('%Y-%m-%d %H:%M:%S')}] Successfully loaded {len(stocks)} stocks")
+
+def get_realtime_quotes():
+    """Fetch all A-share market quotes once"""
+    df = ak.stock_zh_a_spot_em()
+    df["代码"] = df["代码"].astype(str)
+    df.set_index("代码", inplace=True)
+    return df
+
+def get_quote_for_stock(df, code: str):
+    """Get single stock quote from full market DataFrame"""
+    if code in df.index:
+        return df.loc[code].to_dict()
+    else:
+        return None
+
+def late_trading_strategy():
+    """Improved trading strategy main function"""
+    now = datetime.datetime.now()
+    print(f"[{now.strftime('%Y-%m-%d %H:%M:%S')}] Strategy started...")
+
+    try:
+        market_df = get_realtime_quotes()
+        selected_stocks = []
+
+        for _, row in stocks.iterrows():
+            code = str(row["代码"]).zfill(6)
+            info = get_quote_for_stock(market_df, code)
+            if info is None:
+                continue
+
+            try:
+                turnover = float(info.get("换手率", 0))
+                circulating_value = float(info.get("流通市值", 0))
+                volume_ratio = float(info.get("量比", 0))
+                pct_change = float(info.get("涨跌幅", 0))
+                amount = float(info.get("成交额", 0))
+                amplitude = float(info.get("振幅", 0))
+                speed = float(info.get("涨速", 0))
+                five_min_change = float(info.get("5分钟涨跌", 0))
+                sixty_day_change = float(info.get("60日涨跌幅", 0))
+                pe_ratio = float(info.get("市盈率-动态", 0))
+                pb_ratio = float(info.get("市净率", 0))
+
+            except Exception as e:
+                print(f"[{code}] Data parse error: {e}")
+                continue
+
+            # ===== Screening conditions =====
+            if (
+                turnover > 5
+                and circulating_value < 2e11
+                and volume_ratio > 1.2
+                and amount > 5e8
+                and amplitude > 3
+                and (speed > 0 or five_min_change > 0.5)
+                and sixty_day_change > 0
+                and pe_ratio < 80
+                and pb_ratio < 10
+            ):
+                selected_stocks.append({
+                    "code": code,
+                    "name": info.get("名称", ""),
+                    "pct_change": pct_change,
+                    "turnover": turnover,
+                    "volume_ratio": volume_ratio,
+                    "circulating_value": circulating_value,
+                    "amount": amount,
+                    "amplitude": amplitude,
+                    "speed": speed,
+                    "five_min_change": five_min_change,
+                    "sixty_day_change": sixty_day_change,
+                    "pe_ratio": pe_ratio,
+                    "pb_ratio": pb_ratio,
+                    "fundamental_score": row.get("基本面评分", None),
+                    "technical_score": row.get("技术面评分", None),
+                    "total_score": row.get("总分", None),
+                })
+
+        # Print results
+        if selected_stocks:
+            send_late_suggestion(selected_stocks_to_html(selected_stocks))
+        else:
+            print("No stock matched the conditions.")
+
+    except Exception as e:
+        now = datetime.datetime.now()
+        print(f"[{now.strftime('%Y-%m-%d %H:%M:%S')}] Strategy error: {str(e)}")
+
+    # Check closing time
+    current_time = datetime.datetime.now()
+    close_time = current_time.replace(hour=15, minute=0, second=0, microsecond=0)
+
+    if current_time >= close_time:
+        print(f"[{current_time.strftime('%Y-%m-%d %H:%M:%S')}] Market closed, stop strategy")
+        return False
+    else:
+        return True
+
+
+def run_strategy_until_close():
+    init_stocks()
+
+    now = datetime.datetime.now()
+    print(f"[{now.strftime('%Y-%m-%d %H:%M:%S')}] Start monitoring strategy until close...")
+
+    while True:
+        should_continue = late_trading_strategy()
+        if not should_continue:
+            break
+        time.sleep(60*5)
+
+
 
 def send_late_suggestion(table_html):
 
@@ -116,23 +253,48 @@ def send_daily_report_test():
             print(f"发送失败: from {FROM_EMAIL} -> {recipient}: {e}")
 
 
-
-
 def schedule_jobs():
-    """Register weekday 22:00 jobs using schedule."""
+    """(Re)register today's jobs. safe to call multiple times."""
     schedule.clear()
-    schedule.every().monday.at("15:45").do(send_daily_report)
-    schedule.every().tuesday.at("15:45").do(send_daily_report)
-    schedule.every().wednesday.at("15:45").do(send_daily_report)
-    schedule.every().thursday.at("15:45").do(send_daily_report)
-    schedule.every().friday.at("15:45").do(send_daily_report)
+    now = datetime.datetime.now()
+    print(f"[{now.strftime('%Y-%m-%d %H:%M:%S')}] schedule_jobs() called")
 
+    if not is_trading_day():
+        print(f"[{now.strftime('%Y-%m-%d %H:%M:%S')}] 非交易日，跳过任务注册")
+        return
+
+    # 让 run_strategy_until_close 在独立线程里运行，避免阻塞 schedule.run_pending()
+    schedule.every().day.at("14:45").do(
+        lambda: threading.Thread(target=run_strategy_until_close, daemon=True).start()
+    )
+
+    # 日报仍然可以直接注册（send_daily_report 本身是短任务）
+    schedule.every().day.at("15:45").do(send_daily_report)
+
+    # 打印当前已注册任务，便于调试
+    print(f"[{now.strftime('%Y-%m-%d %H:%M:%S')}] 已注册任务：")
+    for j in schedule.jobs:
+        print("  -", j)
 
 def run_timer():
+    # 1) 启动时先注册一次，确保程序启动当天有任务
     schedule_jobs()
+
+    last_refresh_date = None
     while True:
-        schedule.run_pending()
+        try:
+            schedule.run_pending()
+        except Exception as e:
+            print(f"[{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] schedule.run_pending 出错: {e}")
+
+        # 每天凌晨刷新一次任务注册（避免跨日问题）
+        now = datetime.datetime.now()
+        if now.date() != last_refresh_date and now.hour == 0 and now.minute < 5:
+            schedule_jobs()
+            last_refresh_date = now.date()
+
         time.sleep(20)
+
 
 
 if __name__ == "__main__":
