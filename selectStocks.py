@@ -1,5 +1,6 @@
 import akshare as ak
 import pandas as pd
+from api import get_stock_history
 from tqdm import tqdm, trange
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import os
@@ -286,121 +287,6 @@ def pick_stocks_multithread(max_workers=20, strategy="a"):
 
     return pd.DataFrame(results)
 
-# def calculate_technical_score(symbol: str, start_date: str, end_date: str, adjust: str = "qfq") -> float:
-    """
-    计算技术面评分 (0-100)，综合：
-    - MACD 状态与金叉
-    - 均线多头排列（MA5/10/20/60）
-    - RSI 合理区间
-    - 布林带位置
-    - 成交量放大（量比近5/10）
-
-    返回分数，建议阈值：>= 55 视为通过。
-    """
-    # 获取历史行情
-    df = ak.stock_zh_a_hist(symbol=symbol, period="daily",
-                            start_date=start_date, end_date=end_date, adjust=adjust)
-    df.rename(columns={"日期": "date", "收盘": "close"}, inplace=True)
-    df["close"] = pd.to_numeric(df["close"], errors="coerce")
-    df = df.dropna(subset=["close"]).reset_index(drop=True)
-    if df.empty:
-        return 0.0
-
-    # 计算MACD
-    short, long, m = 12, 26, 9
-    df["EMA12"] = df["close"].ewm(span=short, adjust=False).mean()
-    df["EMA26"] = df["close"].ewm(span=long, adjust=False).mean()
-    df["DIF"] = df["EMA12"] - df["EMA26"]
-    df["DEA"] = df["DIF"].ewm(span=m, adjust=False).mean()
-    df["MACD"] = 2 * (df["DIF"] - df["DEA"])
-
-    # 均线
-    for w in [5, 10, 20, 60]:
-        df[f"MA{w}"] = df["close"].rolling(window=w).mean()
-
-    # RSI (14日)
-    delta = df["close"].diff()
-    up = delta.clip(lower=0)
-    down = -delta.clip(upper=0)
-    roll_up = up.rolling(window=14).mean()
-    roll_down = down.rolling(window=14).mean()
-    RS = roll_up / roll_down
-    df["RSI"] = 100 - (100 / (1 + RS))
-    
-    # 布林带（20, 2）
-    df["STD20"] = df["close"].rolling(window=20).std()
-    df["BB_MID"] = df["MA20"]
-    df["BB_UP"] = df["BB_MID"] + 2 * df["STD20"]
-    df["BB_LOW"] = df["BB_MID"] - 2 * df["STD20"]
-
-    # 成交量与量比（若缺失则置零）
-    vol_col = "成交量" if "成交量" in df.columns else None
-    if vol_col:
-        df["VOL5"] = pd.to_numeric(df[vol_col], errors="coerce").rolling(window=5).mean()
-        df["VOL10"] = pd.to_numeric(df[vol_col], errors="coerce").rolling(window=10).mean()
-        last_vol = pd.to_numeric(df.iloc[-1][vol_col], errors="coerce")
-        vol_ratio = 0.0
-        base = max(df.iloc[-1]["VOL5"] or 0, df.iloc[-1]["VOL10"] or 0)
-        if pd.notna(last_vol) and pd.notna(base) and base > 0:
-            vol_ratio = float(last_vol) / float(base)
-    else:
-        vol_ratio = 0.0
-
-    # 最新一日数据
-    last = df.iloc[-1]
-    close = float(last["close"])
-    macd = float(last.get("MACD", 0) or 0)
-    ma5 = float(last.get("MA5", 0) or 0)
-    ma10 = float(last.get("MA10", 0) or 0)
-    ma20 = float(last.get("MA20", 0) or 0)
-    ma60 = float(last.get("MA60", 0) or 0)
-    rsi = float(last.get("RSI", 50) or 50)
-    bb_mid = float(last.get("BB_MID", ma20) or ma20)
-    bb_low = float(last.get("BB_LOW", ma20) or ma20)
-
-    # 金叉检测（最近10天）
-    df["golden_cross"] = (df["DIF"] > df["DEA"]) & (df["DIF"].shift(1) <= df["DEA"].shift(1))
-    has_gc = bool(df["golden_cross"].iloc[-10:].any())
-
-    # 评分
-    score = 0.0
-
-    # MACD 与金叉 (25)
-    if macd > 0:
-        score += 15
-    if has_gc:
-        score += 10
-
-    # 均线多头 (25)
-    if ma5 > ma10 > ma20 > ma60:
-        score += 25
-    elif ma5 > ma10 > ma20:
-        score += 16
-    elif ma5 > ma10:
-        score += 8
-
-    # RSI 区间 (15)
-    if 40 <= rsi <= 70:
-        score += 15
-    elif 30 <= rsi <= 80:
-        score += 8
-
-    # 价格相对布林带 (10)
-    if close > bb_mid:
-        score += 10
-    elif close > bb_low:
-        score += 5
-
-    # 量比 (25)
-    if vol_ratio >= 1.8:
-        score += 25
-    elif vol_ratio >= 1.4:
-        score += 16
-    elif vol_ratio >= 1.2:
-        score += 10
-
-    return float(min(100.0, max(0.0, score)))
-
 def calculate_technical_score(symbol: str, start_date: str, end_date: str, adjust: str = "qfq") -> float:
     """
     计算技术面评分 (0-100)，综合：
@@ -412,12 +298,12 @@ def calculate_technical_score(symbol: str, start_date: str, end_date: str, adjus
     - 波底刚上翘（低位反转信号）
     """
     # 获取历史行情
-    df = ak.stock_zh_a_hist(symbol=symbol, period="daily",
-                            start_date=start_date, end_date=end_date, adjust=adjust)
-    df.rename(columns={"日期": "date", "收盘": "close"}, inplace=True)
-    df["close"] = pd.to_numeric(df["close"], errors="coerce")
-    df = df.dropna(subset=["close"]).reset_index(drop=True)
-    if df.empty:
+    try:
+        df = get_stock_history(symbol=symbol, start_date=start_date, end_date=end_date, adjust=adjust)
+        if df.empty:
+            return 0.0
+    except Exception as e:
+        print(f"Error getting stock history for {symbol}: {e}")
         return 0.0
 
     # ============ 技术指标 ============
