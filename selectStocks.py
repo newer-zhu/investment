@@ -7,8 +7,11 @@ import os
 import datetime
 from typing import Dict, Any
 from utils import parse_number, safe_get, is_industry, get_latest_quarter, load_config_from_ini
+import tushare as ts
+from time import sleep
 
-
+ts.set_token('fbf2b6227d7a9df2ca8e3cc18c29cd38be4929bcd77dee4b95092f4f')
+pro = ts.pro_api()
 # 全局资金上限（单位：元）
 MAX_FUNDS = float(load_config_from_ini("strategy").get("max_funds", 20000))
 # 股票行业信息
@@ -98,28 +101,224 @@ def init_fund_flow_cache():
 
     """初始化全局行情缓存，每天只请求一次接口"""
 
+def ts_code_to_code(ts_code: str) -> str:
+    """将tushare的ts_code (如000001.SZ) 转换为6位数字代码 (如000001)"""
+    return ts_code.split('.')[0]
+
+def code_to_ts_code(code: str, market: str = None) -> str:
+    """将6位数字代码转换为tushare的ts_code"""
+    if market:
+        return f"{code}.{market}"
+    # 根据代码前缀判断市场
+    if code.startswith(('600', '601', '603', '605', '688', '689')):
+        return f"{code}.SH"  # 上海
+    elif code.startswith(('000', '001', '002', '003', '300', '301')):
+        return f"{code}.SZ"  # 深圳
+    else:
+        return f"{code}.SH"  # 默认上海
+
+def build_quote_dict_from_hist(code: str, name: str, hist_df: pd.DataFrame) -> dict:
+    """从历史数据构建QUOTE_DICT条目"""
+    if hist_df.empty:
+        return None
+    
+    latest = hist_df.iloc[-1]
+    # 计算年初至今涨跌幅
+    current_year_start = datetime.date.today().replace(month=1, day=1).strftime("%Y%m%d")
+    year_start_price = None
+    if len(hist_df) > 0:
+        year_start_rows = hist_df[hist_df['trade_date'].astype(str) >= current_year_start]
+        if len(year_start_rows) > 0:
+            year_start_price = float(year_start_rows.iloc[0].get('close', 0))
+    current_price = float(latest.get('close', 0)) if pd.notna(latest.get('close')) else 0
+    ytd_pct_chg = ((current_price - year_start_price) / year_start_price * 100) if year_start_price and year_start_price > 0 else 0
+    
+    # 成交额单位转换：tushare返回的是千元，转换为元
+    amount = float(latest.get('amount', 0)) * 1000 if pd.notna(latest.get('amount')) else 0
+    
+    return {
+        "代码": code,
+        "名称": name,
+        "最新价": current_price,
+        "涨跌幅": float(latest.get('pct_chg', 0)) if pd.notna(latest.get('pct_chg')) else 0,
+        "涨跌额": float(latest.get('change', 0)) if pd.notna(latest.get('change')) else 0,
+        "成交量": float(latest.get('vol', 0)) * 100 if pd.notna(latest.get('vol')) else 0,  # tushare返回的是手，转换为股
+        "成交额": amount,
+        "最高": float(latest.get('high', 0)) if pd.notna(latest.get('high')) else 0,
+        "最低": float(latest.get('low', 0)) if pd.notna(latest.get('low')) else 0,
+        "今开": float(latest.get('open', 0)) if pd.notna(latest.get('open')) else 0,
+        "昨收": float(latest.get('pre_close', 0)) if pd.notna(latest.get('pre_close')) else 0,
+        "换手率": 0,  # 需要从其他接口获取，暂时设为0
+        "流通市值": 0,  # 需要从其他接口获取，暂时设为0
+        "总市值": 0,  # 需要从其他接口获取，暂时设为0
+        "年初至今涨跌幅": ytd_pct_chg,
+        "市盈率-动态": 0,  # 需要从其他接口获取，暂时设为0
+        "市净率": 0,  # 需要从其他接口获取，暂时设为0
+    }
+
 def init_quote_dict():
     global QUOTE_DICT
-
-    today_str = pd.Timestamp.now().strftime("%Y-%m-%d")
+    
     cache_dir = "cache"
-    os.makedirs(cache_dir, exist_ok=True)   # 确保 cache 文件夹存在
-    CACHE_FILE = os.path.join(cache_dir, f"quote_cache_{today_str}.csv")
+    history_cache_dir = os.path.join(cache_dir, "history")
+    os.makedirs(cache_dir, exist_ok=True)
+    os.makedirs(history_cache_dir, exist_ok=True)
+    
+    # 计算3年前的日期
+    end_date = datetime.date.today().strftime("%Y%m%d")
+    start_date = (datetime.date.today() - datetime.timedelta(days=3*365)).strftime("%Y%m%d")
+    
+    print("获取股票列表...")
+    try:
+        # 获取所有上市股票列表
+        stock_basic_df = pro.stock_basic(exchange='', list_status='L', 
+                                         fields='ts_code,symbol,name,area,industry,market')
+        print(f"获取到 {len(stock_basic_df)} 只上市股票")
+    except Exception as e:
+        print(f"获取股票列表失败: {e}")
+        # 回退：从数据库读取已有数据的全部 ts_code
+        try:
+            from db_utils import DbUtils
+            db_fallback = DbUtils()
+            stock_basic_df = db_fallback.query_df("SELECT DISTINCT ts_code FROM stock_data")
+            if stock_basic_df is None or stock_basic_df.empty:
+                print("数据库中未找到任何历史 ts_code，终止初始化。")
+                return
+            # 填充最小必要列，后续会根据 ts_code 生成 code，并且行业等字段后续不强依赖
+            stock_basic_df['symbol'] = stock_basic_df['ts_code'].apply(ts_code_to_code)
+            stock_basic_df['name'] = ""
+            stock_basic_df['area'] = ""
+            stock_basic_df['industry'] = ""
+            stock_basic_df['market'] = ""
+            print(f"从数据库回退获取到 {len(stock_basic_df)} 个 ts_code")
+        except Exception as ex:
+            print(f"数据库回退获取 ts_code 失败: {ex}")
+            return
+    
+    print("获取ST股票列表...")
+    try:
+        # 获取ST股票列表
+        st_df = pro.stock_st(ts_code='', fields='ts_code,name')
+        st_codes = set(st_df['ts_code'].apply(ts_code_to_code).astype(str))
+        print(f"获取到 {len(st_codes)} 只ST股票")
+    except Exception as e:
+        print(f"获取ST股票列表失败: {e}")
+        st_codes = set()
+    
+    # 排除ST股票，只保留A股（排除创业板300/301、科创板688/689、新三板8开头）
+    stock_basic_df['code'] = stock_basic_df['ts_code'].apply(ts_code_to_code)
+    stock_basic_df = stock_basic_df[~stock_basic_df['code'].isin(st_codes)]
+    # 排除创业板、科创板、新三板
+    mask = ~stock_basic_df['code'].str.startswith(('300', '301', '688', '689', '8'))
+    stock_basic_df = stock_basic_df[mask].reset_index(drop=True)
+    print(f"排除ST和特殊板块后，剩余 {len(stock_basic_df)} 只股票")
+    
+    # 缓存行业信息到INFO_CACHE
+    print("缓存股票行业信息...")
+    global INFO_CACHE
+    for _, row in stock_basic_df.iterrows():
+        code = row['code']
+        industry = row.get('industry', '')
+        if industry and pd.notna(industry):
+            INFO_CACHE[code] = industry
+    
+    # 缓存每只股票的历史数据（过去3年）
+    print("开始缓存股票历史数据...")
+    QUOTE_DICT.clear()
+    cached_count = 0
+    failed_count = 0
+    
+    from db_utils import DbUtils
+    db = DbUtils()
 
-    if os.path.exists(CACHE_FILE):
-        print("使用本地缓存行情数据")
-        quote_df = pd.read_csv(CACHE_FILE, dtype={"代码": str})
-    else:
-        print("本地缓存无效，联网拉取行情数据...")
-        quote_df = ak.stock_sh_a_spot_em()
-        quote_df.to_csv(CACHE_FILE, index=False)
+    for idx, row in tqdm(stock_basic_df.iterrows(), total=len(stock_basic_df), desc="缓存历史数据"):
+        ts_code = row['ts_code']
+        code = row['code']
+        name = row['name']
+        
+        try:
+            # 查询该 ts_code 在库中已存在的最大交易日
+            try:
+                existing_df = db.query_df(
+                    "SELECT DATE_FORMAT(MAX(trade_date), '%Y%m%d') AS max_date FROM stock_data WHERE ts_code = :ts_code",
+                    {"ts_code": ts_code},
+                )
+                existing_end_date = str(existing_df.iloc[0]["max_date"]) if not existing_df.empty else None
+            except Exception as e:
+                existing_end_date = None
+                if failed_count < 5:
+                    print(f"查询 {code} 最新交易日失败: {e}")
 
-    for _, row in quote_df.iterrows():
-        code = row["代码"]
-        QUOTE_DICT[code] = {
-            col: parse_number(row[col]) if col not in ["代码", "名称"] else row[col]
-            for col in quote_df.columns
-        }
+            # 拉取并写入增量或全量数据
+            fetch_start = None
+            if existing_end_date and existing_end_date != "None":
+                if existing_end_date < end_date:
+                    # 从现有数据的下一天开始获取
+                    fetch_start = str(int(existing_end_date) + 1)
+            else:
+                fetch_start = start_date
+
+            if fetch_start is not None and fetch_start <= end_date:
+                try:
+                    new_df = pro.daily(ts_code=ts_code, start_date=fetch_start, end_date=end_date)
+                    sleep(1) # 避免请求过于频繁
+                    if new_df is not None and not new_df.empty and 'trade_date' in new_df.columns:
+                        # 将 trade_date 转换为日期对象以匹配数据库 DATE 类型
+                        # 同时确保列名与表结构一致
+                        df_to_write = new_df.copy()
+                        # Tushare 返回的 trade_date 为 'YYYYMMDD' 字符串，转换为日期
+                        df_to_write['trade_date'] = pd.to_datetime(df_to_write['trade_date'], format="%Y%m%d").dt.date
+                        # 写入（upsert）
+                        db.upsert_df(
+                            df=df_to_write[['ts_code', 'trade_date', 'open', 'high', 'low', 'close', 'pre_close', 'change', 'pct_chg', 'vol', 'amount']],
+                            table_name="stock_data",
+                            key_columns=["ts_code", "trade_date"],
+                        )
+                except Exception as e:
+                    if failed_count < 10:
+                        print(f"获取/写入 {code}({name}) 历史数据失败: {e}")
+            
+            # 构建QUOTE_DICT条目
+            # 仅从数据库读取最新交易日的数据以构建行情，避免占用过多内存
+            try:
+                hist_df = db.query_df(
+                    """
+                    SELECT s.ts_code,
+                           DATE_FORMAT(s.trade_date, '%Y%m%d') AS trade_date,
+                           s.`open`, s.`high`, s.`low`, s.`close`, s.`pre_close`, s.`change`, s.`pct_chg`, s.`vol`, s.`amount`
+                    FROM stock_data s
+                    JOIN (
+                        SELECT ts_code AS ts, MAX(trade_date) AS max_date
+                        FROM stock_data
+                        WHERE ts_code = :ts_code
+                    ) t
+                      ON s.ts_code = t.ts AND s.trade_date = t.max_date
+                    """,
+                    {"ts_code": ts_code},
+                )
+            except Exception as e:
+                hist_df = None
+                if failed_count < 5:
+                    print(f"读取 {code} 历史数据失败: {e}")
+
+            if hist_df is not None and not hist_df.empty and 'trade_date' in hist_df.columns:
+                # 确保 trade_date 为字符串（YYYYMMDD）以兼容后续处理
+                hist_df['trade_date'] = hist_df['trade_date'].astype(str)
+                quote_entry = build_quote_dict_from_hist(code, name, hist_df.sort_values('trade_date'))
+                if quote_entry:
+                    QUOTE_DICT[code] = quote_entry
+                    cached_count += 1
+                else:
+                    failed_count += 1
+            else:
+                failed_count += 1
+        except Exception as e:
+            failed_count += 1
+            if failed_count <= 10:
+                print(f"处理 {code}({name}) 时发生错误: {e}")
+    
+    print(f"历史数据缓存完成: 成功 {cached_count} 只，失败 {failed_count} 只")
+    print(f"QUOTE_DICT 已加载 {len(QUOTE_DICT)} 只股票的行情数据")
         
     init_fund_flow_cache()  
     init_half_year_high()
@@ -589,6 +788,8 @@ def save_and_print_picked(picked: pd.DataFrame, prefix="picked_stocks", folder="
     print(f"已导出文件：{filepath}")
 
 if __name__ == "__main__":
+    # 禁止 requests 走代理
+
     pd.set_option("display.max_rows", None)
     init_quote_dict()  # 初始化
 

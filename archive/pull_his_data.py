@@ -1,56 +1,114 @@
+import os
+import sys
+from pathlib import Path
+from typing import List
+
 import pandas as pd
-import requests
-import datetime
-import akshare as ak
-from sqlalchemy import create_engine, text
 
-def save_to_mysql(df: pd.DataFrame, engine):
+# Ensure project root is on sys.path for module imports
+CURRENT_DIR = os.path.dirname(__file__)
+PROJECT_ROOT = os.path.abspath(os.path.join(CURRENT_DIR, os.pardir))
+if PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, PROJECT_ROOT)
 
-    # 重命名字段匹配数据库
-    df = df.rename(columns={
-        "日期": "trade_date",
-        "股票代码": "stock_code",
-        "开盘": "open_price",
-        "收盘": "close_price",
-        "最高": "high_price",
-        "最低": "low_price",
-        "成交量": "volume",
-        "成交额": "amount",
-        "振幅": "amplitude",
-        "涨跌幅": "pct_change",
-        "涨跌额": "price_change",
-        "换手率": "turnover_rate"
-    })
+from db_utils import DbUtils, create_db_engine
 
-    # 逐行插入，避免重复
-    insert_sql = """
-        INSERT IGNORE INTO stock_zh_a_hist (
-            trade_date, stock_code, open_price, close_price, high_price, low_price,
-            volume, amount, amplitude, pct_change, price_change, turnover_rate
-        )
-        VALUES (
-            :trade_date, :stock_code, :open_price, :close_price, :high_price, :low_price,
-            :volume, :amount, :amplitude, :pct_change, :price_change, :turnover_rate
-        )
+
+def guess_ts_code_from_code(code: str) -> str:
     """
-    with engine.begin() as conn:
-        conn.execute(text(insert_sql), df.to_dict(orient="records"))
-    print(f"✅ 成功插入 {len(df)} 条数据")
+    将6位数字代码猜测转换为 tushare ts_code（可能不完全准确，但覆盖主板/创业板/科创板常见前缀）
+    """
+    if code.startswith(("600", "601", "603", "605", "688", "689")):
+        return f"{code}.SH"
+    return f"{code}.SZ"
+
+
+def normalize_daily_df(df: pd.DataFrame, fallback_ts_code: str) -> pd.DataFrame:
+    """
+    规范化从缓存CSV读取的日线数据，匹配表 stock_data 所需字段与类型。
+    - trade_date: 转换为 YYYY-MM-DD
+    - 数值列: 转换为数值类型，缺失填0
+    - ts_code: 若缺失则用文件名推断
+    """
+    needed_cols = [
+        "ts_code",
+        "trade_date",
+        "open",
+        "high",
+        "low",
+        "close",
+        "pre_close",
+        "change",
+        "pct_chg",
+        "vol",
+        "amount",
+    ]
+
+    # 添加缺失列
+    for c in needed_cols:
+        if c not in df.columns:
+            df[c] = None
+
+    if df["ts_code"].isna().all():
+        df["ts_code"] = fallback_ts_code
+
+    # 日期格式
+    df["trade_date"] = pd.to_datetime(df["trade_date"].astype(str), errors="coerce").dt.strftime("%Y-%m-%d")
+
+    # 数值列
+    num_cols = ["open", "high", "low", "close", "pre_close", "change", "pct_chg", "vol", "amount"]
+    for c in num_cols:
+        df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0)
+
+    # 仅保留必要列并去重
+    df = df[needed_cols].dropna(subset=["ts_code", "trade_date"]).drop_duplicates(subset=["ts_code", "trade_date"])
+    return df.reset_index(drop=True)
+
+
+def load_all_history_csvs(history_dir: str) -> List[Path]:
+    p = Path(history_dir)
+    if not p.exists():
+        return []
+    return sorted(p.glob("*.csv"))
+
+
+def main():
+    # DB 连接
+    engine = create_db_engine("mysql+pymysql://root:20001030@localhost:3306/finance?charset=utf8mb4")
+    db = DbUtils(engine=engine)
+
+    history_dir = os.path.join("cache", "history")
+    files = load_all_history_csvs(history_dir)
+    if not files:
+        print("未找到任何历史数据CSV文件，路径: ", history_dir)
+        return
+
+    total_rows = 0
+    for f in files:
+        try:
+            code = f.stem  # 文件名不含扩展名，如 000001
+            ts_code = code
+            df = pd.read_csv(f, dtype={"trade_date": str})
+            if df is None or df.empty:
+                continue
+
+            df_norm = normalize_daily_df(df, ts_code)
+            if df_norm.empty:
+                continue
+
+            # 批量 upsert 到 stock_data（主键: ts_code, trade_date）
+            db.upsert_df(
+                df=df_norm,
+                table_name="stock_data",
+                key_columns=["ts_code", "trade_date"],
+            )
+            total_rows += len(df_norm)
+            print(f"✅ 导入 {f.name}: {len(df_norm)} 行")
+        except Exception as e:
+            print(f"❌ 导入 {f.name} 失败: {e}")
+
+    print(f"完成导入，总计 {total_rows} 行")
 
 
 if __name__ == "__main__":
-    # === 配置数据库连接 ===
-    engine = create_engine("mysql+pymysql://root:20001030@localhost:3306/finance?charset=utf8mb4")
-
-    end_date = datetime.date.today()
-    start_date = end_date - datetime.timedelta(days=1024)
-
-    df = ak.stock_zh_a_hist(
-        symbol="603662",
-        start_date=start_date.strftime("%Y%m%d"),
-        end_date=end_date.strftime("%Y%m%d"),
-        adjust="qfq"
-    )
-
-    print(df.head())
-    save_to_mysql(df, engine)
+    main()
