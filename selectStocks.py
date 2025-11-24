@@ -124,12 +124,29 @@ def init_quote_dict():
     init_fund_flow_cache()  
     init_half_year_high()
     load_ljqd_blacklist()
+    
 
+"""获取股票行业信息，带CSV缓存"""
 def get_industry_from_cache(code):
-    """获取股票行业信息，带缓存"""
+    # 首次调用时，从CSV加载缓存
+    if not INFO_CACHE:
+        cache_dir = "cache"
+        os.makedirs(cache_dir, exist_ok=True)
+        cache_file = os.path.join(cache_dir, "stock_industry_cache.csv")
+        
+        if os.path.exists(cache_file):
+            try:
+                df_cache = pd.read_csv(cache_file, dtype={"code": str})
+                for _, row in df_cache.iterrows():
+                    INFO_CACHE[row["code"]] = row["industry"] if pd.notna(row["industry"]) else None
+            except Exception as e:
+                print(f"[WARNING] 加载行业缓存失败: {e}")
+    
+    # 检查内存缓存
     if code in INFO_CACHE:
         return INFO_CACHE[code]
 
+    # 如果不在缓存中，调用API获取
     try:
         df_info = ak.stock_individual_info_em(symbol=code)
         industry_row = df_info[df_info["item"] == "行业"]
@@ -137,10 +154,35 @@ def get_industry_from_cache(code):
             industry = industry_row["value"].iloc[0]
         else:
             industry = None
-    except:
+    except Exception as e:
+        print(f"[WARNING] 获取 {code} 行业信息失败: {e}")
         industry = None
 
+    # 更新内存缓存
     INFO_CACHE[code] = industry
+    
+    # 保存到CSV
+    cache_dir = "cache"
+    os.makedirs(cache_dir, exist_ok=True)
+    cache_file = os.path.join(cache_dir, "stock_industry_cache.csv")
+    
+    try:
+        # 读取现有数据或创建新的DataFrame
+        if os.path.exists(cache_file):
+            df_cache = pd.read_csv(cache_file, dtype={"code": str})
+            # 如果code已存在，更新；否则追加
+            if code in df_cache["code"].values:
+                df_cache.loc[df_cache["code"] == code, "industry"] = industry
+            else:
+                df_cache = pd.concat([df_cache, pd.DataFrame({"code": [code], "industry": [industry]})], ignore_index=True)
+        else:
+            df_cache = pd.DataFrame({"code": [code], "industry": [industry]})
+        
+        # 保存到CSV
+        df_cache.to_csv(cache_file, index=False, encoding="utf-8-sig")
+    except Exception as e:
+        print(f"[WARNING] 保存行业缓存失败: {e}")
+    
     return industry
 
 # 突破上涨的股票
@@ -412,12 +454,62 @@ def calculate_technical_score(symbol: str, start_date: str, end_date: str, adjus
 
 
 def get_fundamental_data(code: str) -> Dict[str, Any]:
-    """获取基本面数据，返回详细指标字典"""
-    try:
-        df = ak.stock_financial_abstract_ths(symbol=code)
-        if df.empty:
+    """获取基本面数据，返回详细指标字典，带CSV缓存（每月自动刷新）"""
+    # 创建缓存目录
+    cache_dir = "cache"
+    os.makedirs(cache_dir, exist_ok=True)
+    
+    # 使用股票代码作为文件名前缀
+    cache_file = os.path.join(cache_dir, f"{code}_financial.csv")
+    
+    # 检查缓存文件是否存在且是否需要刷新（每月刷新一次）
+    need_refresh = False
+    df = None
+    
+    if os.path.exists(cache_file):
+        try:
+            # 检查文件修改时间，如果超过1个月则刷新
+            file_mtime = os.path.getmtime(cache_file)
+            file_time = datetime.datetime.fromtimestamp(file_mtime)
+            time_diff = datetime.datetime.now() - file_time
+            
+            # 如果缓存超过30天，需要刷新
+            if time_diff.days > 30:
+                need_refresh = True
+                print(f"[INFO] {code} 财务缓存已超过30天，刷新数据...")
+            else:
+                # 缓存仍然有效，加载缓存数据
+                df = pd.read_csv(cache_file)
+                if df.empty:
+                    df = None
+                    need_refresh = True
+        except Exception as e:
+            print(f"[WARNING] 读取财务缓存文件 {cache_file} 失败: {e}")
+            df = None
+            need_refresh = True
+    else:
+        need_refresh = True
+    
+    # 如果缓存不存在或需要刷新，从API获取
+    if need_refresh:
+        try:
+            df = ak.stock_financial_abstract_ths(symbol=code)
+            if df.empty:
+                return {}
+            
+            # 保存到CSV
+            try:
+                df.to_csv(cache_file, index=False, encoding="utf-8-sig")
+            except Exception as e:
+                print(f"[WARNING] 保存财务缓存文件 {cache_file} 失败: {e}")
+        except Exception as e:
+            print(f"{code} 财务基本面数据获取失败: {e}")
             return {}
-        
+    
+    if df.empty:
+        return {}
+    
+    try:
         latest = df.iloc[-1]  # 取最新季度
         
         # 基础财务指标
@@ -430,8 +522,8 @@ def get_fundamental_data(code: str) -> Dict[str, Any]:
         current_ratio = parse_number(safe_get(latest, "流动比率"))
         
         row = QUOTE_DICT.get(code)
-        pe_ratio = row.get("市盈率-动态", 0)
-        pb_ratio = row.get("市净率", 0)
+        pe_ratio = row.get("市盈率-动态", 0) if row else 0
+        pb_ratio = row.get("市净率", 0) if row else 0
 
         data_out: Dict[str, Any] = {
             "net_profit": net_profit,
@@ -445,9 +537,8 @@ def get_fundamental_data(code: str) -> Dict[str, Any]:
             "pb_ratio": pb_ratio
         }
         return data_out
-        
     except Exception as e:
-        print(f"{code} 财务基本面数据获取失败: {e}")
+        print(f"{code} 财务基本面数据处理失败: {e}")
         return {}
    
 """计算基本面评分 (0-100)"""

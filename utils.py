@@ -1,5 +1,4 @@
 # utils.py
-# utils.py
 import os
 import smtplib
 import configparser
