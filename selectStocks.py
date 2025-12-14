@@ -683,7 +683,7 @@ if __name__ == "__main__":
     pd.set_option("display.max_rows", None)
     init_quote_dict()  # 初始化
 
-    picked = pick_stocks_multithread( max_workers=10, strategy="b")
+    picked = pick_stocks_multithread( max_workers=1, strategy="b")
     picked = picked.drop_duplicates(subset="代码").reset_index(drop=True)
     picked = picked.sort_values(by="总分", ascending=False).reset_index(drop=True)
 
