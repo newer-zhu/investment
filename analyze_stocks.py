@@ -3,6 +3,7 @@ import sys
 import datetime
 import pandas as pd
 import akshare as ak
+from logger import logger
 
 OUTPUT_FOLDER = "output"
 FILENAME_PREFIX = "picked_stocks"
@@ -63,7 +64,7 @@ def _parse_percent_series(s: pd.Series) -> pd.Series:
     prev_path = find_previous_csv_path()
     today_cache_path = find_today_cache_path()
     if not prev_path or not os.path.exists(today_output_csv_path) or not os.path.exists(today_cache_path):
-        print("缺少上一份/今日输出或今日缓存CSV，跳过组合均值追加。")
+        logger.warning("缺少上一份/今日输出或今日缓存CSV，跳过组合均值追加。")
         return
 
     try:
@@ -71,11 +72,11 @@ def _parse_percent_series(s: pd.Series) -> pd.Series:
         today_output_df = pd.read_csv(today_output_csv_path)
         cache_df = pd.read_csv(today_cache_path, dtype={"代码": str})
     except Exception as e:
-        print(f"读取 CSV 失败: {e}")
+        logger.error(f"读取 CSV 失败: {e}", exc_info=True)
         return
 
     if prev_df.empty or today_output_df.empty or "代码" not in prev_df.columns or "代码" not in cache_df.columns:
-        print("CSV 列不完整或为空，跳过组合均值追加。")
+        logger.warning("CSV 列不完整或为空，跳过组合均值追加。")
         return
 
     prev_codes = set(prev_df["代码"].astype(str).tolist())
@@ -83,14 +84,14 @@ def _parse_percent_series(s: pd.Series) -> pd.Series:
     join_df = cache_df[cache_df["代码"].isin(prev_codes)].copy()
 
     if join_df.empty or "涨跌幅" not in join_df.columns:
-        print("今日缓存 CSV 中缺少匹配代码或列‘涨跌幅’，跳过组合均值追加。")
+        logger.warning("今日缓存 CSV 中缺少匹配代码或列'涨跌幅'，跳过组合均值追加。")
         return
 
     join_df["涨跌幅"] = _parse_percent_series(join_df["涨跌幅"])  # 转为数值（单位：%）
     avg_rise = join_df["涨跌幅"].mean()
 
     # 仅打印结果，不写回 CSV
-    print(f"上一期组合代码数: {len(prev_codes)}；今日平均涨跌幅（%）: {avg_rise}")
+    logger.info(f"上一期组合代码数: {len(prev_codes)}；今日平均涨跌幅（%）: {avg_rise:.2f}")
 
 
 def get_prev_portfolio_avg_message() -> str:
@@ -125,7 +126,7 @@ if __name__ == "__main__":
     # 用法：python analyze_stocks.py [可选: CSV路径]
     csv_path = sys.argv[1] if len(sys.argv) > 1 else find_csv_for_today_or_latest()
     if not csv_path:
-        print("未找到 CSV 文件，请先运行选股导出或手动指定路径。")
+        logger.error("未找到 CSV 文件，请先运行选股导出或手动指定路径。")
         sys.exit(1)
 
     # 追加上一期组合的今日平均涨跌（读取 cache/ 当日行情）

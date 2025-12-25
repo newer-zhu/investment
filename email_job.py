@@ -11,6 +11,7 @@ from utils import is_trading_day,send_email, load_config_from_ini, find_csv_for_
 from analyze_stocks import get_prev_portfolio_avg_message
 import akshare as ak
 from api import get_stock_history
+from logger import logger
 
 # Configuration (config.ini overrides env)
 CONFIG_PATH = os.getenv("EMAIL_JOB_CONFIG", "config.ini")
@@ -47,11 +48,11 @@ def init_stocks():
     """Load stock CSV from today or latest available"""
     csv_path = find_csv_for_today_or_latest()
     now = datetime.datetime.now()
-    print(f"[{now.strftime('%Y-%m-%d %H:%M:%S')}] Reading stock file: {csv_path}")
+    logger.info(f"Reading stock file: {csv_path}")
     
     global stocks
     stocks = pd.read_csv(csv_path)
-    print(f"[{now.strftime('%Y-%m-%d %H:%M:%S')}] Successfully loaded {len(stocks)} stocks")
+    logger.info(f"Successfully loaded {len(stocks)} stocks")
 
 def get_realtime_quotes():
     """Fetch all A-share market quotes once"""
@@ -69,8 +70,7 @@ def get_quote_for_stock(df, code: str):
 
 def late_trading_strategy():
     """Improved trading strategy main function"""
-    now = datetime.datetime.now()
-    print(f"[{now.strftime('%Y-%m-%d %H:%M:%S')}] Strategy started...")
+    logger.info("Strategy started...")
 
     try:
         market_df = get_realtime_quotes()
@@ -88,7 +88,7 @@ def late_trading_strategy():
                 try:
                     hist_df = get_stock_history(symbol=code, start_date=start_date, end_date=end_date)
                 except Exception as e:
-                    print(f"[{code}] 获取历史数据失败: {e}")
+                    logger.warning(f"[{code}] 获取历史数据失败: {e}")
                     continue
 
                 if len(hist_df) >= 4:
@@ -98,10 +98,10 @@ def late_trading_strategy():
                     last3_chg = last4["chg"].iloc[-3:]
                     if (last3_chg > 0).all():
                         # 连续三天收涨，跳过
-                        print(f"[{code}] 连续三天上涨，剔除")
+                        logger.debug(f"[{code}] 连续三天上涨，剔除")
                         continue
             except Exception as e:
-                print(f"[{code}] 历史数据检查失败: {e}")
+                logger.warning(f"[{code}] 历史数据检查失败: {e}")
                 continue
 
 
@@ -119,7 +119,7 @@ def late_trading_strategy():
                 pb_ratio = float(info.get("市净率", 0))
 
             except Exception as e:
-                print(f"[{code}] Data parse error: {e}")
+                logger.warning(f"[{code}] Data parse error: {e}")
                 continue
 
             # ===== Screening conditions =====
@@ -155,20 +155,20 @@ def late_trading_strategy():
 
         # Print results
         if selected_stocks:
+            logger.info(f"策略筛选出 {len(selected_stocks)} 只符合条件的股票")
             send_late_suggestion(selected_stocks_to_html(selected_stocks))
         else:
-            print("No stock matched the conditions.")
+            logger.info("No stock matched the conditions.")
 
     except Exception as e:
-        now = datetime.datetime.now()
-        print(f"[{now.strftime('%Y-%m-%d %H:%M:%S')}] Strategy error: {str(e)}")
+        logger.error(f"Strategy error: {str(e)}", exc_info=True)
 
     # Check closing time
     current_time = datetime.datetime.now()
     close_time = current_time.replace(hour=15, minute=0, second=0, microsecond=0)
 
     if current_time >= close_time:
-        print(f"[{current_time.strftime('%Y-%m-%d %H:%M:%S')}] Market closed, stop strategy")
+        logger.info(f"Market closed, stop strategy")
         return False
     else:
         return True
@@ -177,8 +177,7 @@ def late_trading_strategy():
 def run_strategy_until_close():
     init_stocks()
 
-    now = datetime.datetime.now()
-    print(f"[{now.strftime('%Y-%m-%d %H:%M:%S')}] Start monitoring strategy until close...")
+    logger.info("Start monitoring strategy until close...")
 
     while True:
         should_continue = late_trading_strategy()
@@ -207,7 +206,7 @@ def send_late_suggestion(table_html):
         )
         time.sleep(1)
     except Exception as e:
-        print(f"发送失败: from {FROM_EMAIL} -> {TO_EMAIL}: {e}")
+        logger.error(f"发送失败: from {FROM_EMAIL} -> {TO_EMAIL}: {e}", exc_info=True)
 
 
 
@@ -236,7 +235,7 @@ def extract_top_stocks_from_last3_files():
                 top_codes = df.head(10)["代码"].astype(str).tolist()
                 top_stocks_per_file.append(set(top_codes))
         except Exception as e:
-            print(f"读取文件 {file_path} 失败: {e}")
+            logger.warning(f"读取文件 {file_path} 失败: {e}")
             continue
     
     if len(top_stocks_per_file) < 3:
@@ -274,17 +273,19 @@ def extract_top_stocks_from_last3_files():
         return header + style + details_html
         
     except Exception as e:
-        print(f"生成连续前3位股票详情失败: {e}")
+        logger.error(f"生成连续前3位股票详情失败: {e}", exc_info=True)
         return ""
 
 
 def send_daily_report():
     # 先执行选股与分析脚本，生成并筛选 CSV
+    logger.info("执行选股脚本...")
     try:
         subprocess.run([sys.executable, os.path.join(os.path.dirname(__file__), "selectStocks.py")],
                        check=True)
+        logger.info("选股脚本执行完成")
     except Exception as e:
-        print(f"执行选股/分析脚本失败: {e}")
+        logger.error(f"执行选股/分析脚本失败: {e}", exc_info=True)
 
     csv_path = find_csv_for_today_or_latest()
     prev_msg = get_prev_portfolio_avg_message()
@@ -315,7 +316,7 @@ def send_daily_report():
             )
             time.sleep(1)
         except Exception as e:
-            print(f"发送失败: from {FROM_EMAIL} -> {recipient}: {e}")
+            logger.error(f"发送失败: from {FROM_EMAIL} -> {recipient}: {e}", exc_info=True)
 
 def send_daily_report_test():
     csv_path = find_csv_for_today_or_latest()
@@ -347,17 +348,16 @@ def send_daily_report_test():
             )
             time.sleep(1)
         except Exception as e:
-            print(f"发送失败: from {FROM_EMAIL} -> {recipient}: {e}")
+            logger.error(f"发送失败: from {FROM_EMAIL} -> {recipient}: {e}", exc_info=True)
 
 
 def schedule_jobs():
     """(Re)register today's jobs. safe to call multiple times."""
     schedule.clear()
-    now = datetime.datetime.now()
-    print(f"[{now.strftime('%Y-%m-%d %H:%M:%S')}] schedule_jobs() called")
+    logger.info("schedule_jobs() called")
 
     if not is_trading_day():
-        print(f"[{now.strftime('%Y-%m-%d %H:%M:%S')}] 非交易日，跳过任务注册")
+        logger.info("非交易日，跳过任务注册")
         return
 
     # 让 run_strategy_until_close 在独立线程里运行，避免阻塞 schedule.run_pending()
@@ -369,9 +369,9 @@ def schedule_jobs():
     schedule.every().day.at("14:45").do(send_daily_report)
 
     # 打印当前已注册任务，便于调试
-    print(f"[{now.strftime('%Y-%m-%d %H:%M:%S')}] 已注册任务：")
+    logger.info("已注册任务：")
     for j in schedule.jobs:
-        print("  -", j)
+        logger.info(f"  - {j}")
 
 def run_timer():
     # 1) 启动时先注册一次，确保程序启动当天有任务
@@ -382,7 +382,7 @@ def run_timer():
         try:
             schedule.run_pending()
         except Exception as e:
-            print(f"[{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] schedule.run_pending 出错: {e}")
+            logger.error(f"schedule.run_pending 出错: {e}", exc_info=True)
 
         # 每天凌晨刷新一次任务注册（避免跨日问题）
         now = datetime.datetime.now()

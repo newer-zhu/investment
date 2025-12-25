@@ -9,6 +9,7 @@ import holidays
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from email.header import Header
+from logger import logger
 
 
 OUTPUT_FOLDER = "output"
@@ -112,10 +113,10 @@ def send_email(subject: str, body: str, to_email: str,
         server.sendmail(from_email, [to_email], message.as_string())
         server.quit()
         
-        print(f"邮件发送成功：{from_email} -> {to_email}")
+        logger.info(f"邮件发送成功：{from_email} -> {to_email}")
 
     except Exception as e:
-        print(f"邮件发送失败：{from_email} -> {to_email}: {e}")
+        logger.error(f"邮件发送失败：{from_email} -> {to_email}: {e}", exc_info=True)
 
 def parse_number(s):
     if s is None:

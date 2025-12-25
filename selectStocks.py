@@ -7,6 +7,7 @@ import os
 import datetime
 from typing import Dict, Any
 from utils import parse_number, safe_get, is_industry, get_latest_quarter, load_config_from_ini
+from logger import logger
 
 
 # 全局资金上限（单位：元）
@@ -52,10 +53,10 @@ def load_ljqd_blacklist(min_days=3, min_turnover=20):
         blacklist = df[(df["days"] >= min_days)]["code"].tolist()
 
         ljqd_blacklist = set(blacklist)
-        print(f"[INFO] 已加载 {len(ljqd_blacklist)} 只量价齐跌股票到黑名单")
+        logger.info(f"已加载 {len(ljqd_blacklist)} 只量价齐跌股票到黑名单")
 
     except Exception as e:
-        print(f"[ERROR] 加载量价齐跌黑名单失败: {e}")
+        logger.error(f"加载量价齐跌黑名单失败: {e}", exc_info=True)
 
 """初始化新高股票集合，只请求一次接口"""
 def init_half_year_high(symbol: str = "历史新高"):
@@ -63,9 +64,9 @@ def init_half_year_high(symbol: str = "历史新高"):
     try:
         df = ak.stock_rank_cxg_ths(symbol=symbol)
         HALF_YEAR_HIGH_SET = set(df["股票代码"].astype(str).tolist())
-        print(f"{symbol} 股票数量: {len(HALF_YEAR_HIGH_SET)}")
+        logger.info(f"{symbol} 股票数量: {len(HALF_YEAR_HIGH_SET)}")
     except Exception as e:
-        print(f"获取 {symbol} 数据失败: {e}")
+        logger.error(f"获取 {symbol} 数据失败: {e}", exc_info=True)
         HALF_YEAR_HIGH_SET = set()
 
 """初始化资金流和换手率缓存，只调用一次接口，缓存所有字段"""
@@ -92,9 +93,9 @@ def init_fund_flow_cache():
 
             FUND_FLOW_DICT[code] = row_dict
 
-        print(f"资金流缓存初始化完成，共 {len(FUND_FLOW_DICT)} 条记录")
+        logger.info(f"资金流缓存初始化完成，共 {len(FUND_FLOW_DICT)} 条记录")
     except Exception as e:
-        print(f"初始化资金流缓存失败: {e}")
+        logger.error(f"初始化资金流缓存失败: {e}", exc_info=True)
 
     """初始化全局行情缓存，每天只请求一次接口"""
 
@@ -107,23 +108,30 @@ def init_quote_dict():
     CACHE_FILE = os.path.join(cache_dir, f"quote_cache_{today_str}.csv")
 
     if os.path.exists(CACHE_FILE):
-        print("使用本地缓存行情数据")
+        logger.info("使用本地缓存行情数据")
         quote_df = pd.read_csv(CACHE_FILE, dtype={"代码": str})
     else:
-        print("本地缓存无效，联网拉取行情数据...")
+        logger.info("本地缓存无效，联网拉取行情数据...")
         quote_df = ak.stock_sh_a_spot_em()
         quote_df.to_csv(CACHE_FILE, index=False)
+        logger.info(f"行情数据拉取完成，共 {len(quote_df)} 条记录，已保存到缓存")
 
-    for _, row in quote_df.iterrows():
+    logger.info(f"正在处理行情数据，共 {len(quote_df)} 条...")
+    for _, row in tqdm(quote_df.iterrows(), total=len(quote_df), desc="加载行情数据", leave=False):
         code = row["代码"]
         QUOTE_DICT[code] = {
             col: parse_number(row[col]) if col not in ["代码", "名称"] else row[col]
             for col in quote_df.columns
         }
+    logger.info(f"行情数据加载完成，共 {len(QUOTE_DICT)} 只股票")
         
+    logger.info("开始初始化资金流缓存...")
     init_fund_flow_cache()  
+    logger.info("开始初始化历史新高股票...")
     init_half_year_high()
+    logger.info("开始加载量价齐跌黑名单...")
     load_ljqd_blacklist()
+    logger.info("所有初始化完成")
     
 
 """获取股票行业信息，带CSV缓存"""
@@ -140,7 +148,7 @@ def get_industry_from_cache(code):
                 for _, row in df_cache.iterrows():
                     INFO_CACHE[row["code"]] = row["industry"] if pd.notna(row["industry"]) else None
             except Exception as e:
-                print(f"[WARNING] 加载行业缓存失败: {e}")
+                logger.warning(f"加载行业缓存失败: {e}")
     
     # 检查内存缓存
     if code in INFO_CACHE:
@@ -155,7 +163,7 @@ def get_industry_from_cache(code):
         else:
             industry = None
     except Exception as e:
-        print(f"[WARNING] 获取 {code} 行业信息失败: {e}")
+        logger.warning(f"获取 {code} 行业信息失败: {e}")
         industry = None
 
     # 更新内存缓存
@@ -181,7 +189,7 @@ def get_industry_from_cache(code):
         # 保存到CSV
         df_cache.to_csv(cache_file, index=False, encoding="utf-8-sig")
     except Exception as e:
-        print(f"[WARNING] 保存行业缓存失败: {e}")
+        logger.warning(f"保存行业缓存失败: {e}")
     
     return industry
 
@@ -197,15 +205,21 @@ def load_filter_lists(in_stock):
     stock_list = load_up_trend_stocks()
 
     # ST 股
+    logger.debug("加载ST股列表...")
     try:
         st_codes = set(ak.stock_zh_a_st_em()['代码'].astype(str))
-    except Exception:
+        logger.debug(f"加载ST股完成，共 {len(st_codes)} 只")
+    except Exception as e:
+        logger.warning(f"加载ST股失败: {e}")
         st_codes = set()
 
     # 停牌股
+    logger.debug("加载停牌股列表...")
     try:
         suspension_codes = set(ak.news_trade_notify_suspend_baidu()['股票代码'].astype(str))
-    except Exception:
+        logger.debug(f"加载停牌股完成，共 {len(suspension_codes)} 只")
+    except Exception as e:
+        logger.warning(f"加载停牌股失败: {e}")
         suspension_codes = set()
 
     # 排除 创业板(300/301)、科创板(688/689)、新三板(8开头)
@@ -234,13 +248,18 @@ def load_filter_lists(in_stock):
     ]
 
     # === 行业过滤：一次性批量获取行业信息 ===
-    industries = {code: get_industry_from_cache(code) for code in stock_list['code']}
+    logger.info(f"开始批量获取行业信息，共 {len(stock_list)} 只股票...")
+    industries = {}
+    for code in tqdm(stock_list['code'], desc="获取行业信息", leave=False):
+        industries[code] = get_industry_from_cache(code)
     stock_list["industry"] = stock_list["code"].map(industries)
+    logger.debug(f"行业信息获取完成")
 
     industry_blacklist = ["国防", "军工", "钢铁","贵金属"]
     stock_list = stock_list[~stock_list["industry"].apply(lambda x: is_industry(x, industry_blacklist))]
 
     stock_list = stock_list.reset_index(drop=True)
+    logger.info(f"筛选完成，剩余 {len(stock_list)} 只股票")
     return stock_list[["code"]]
 
 # 动态换手率判断
@@ -271,7 +290,7 @@ def check_stock(code):
     start_date = (datetime.date.today() - datetime.timedelta(days=180)).strftime("%Y%m%d")
 
     for step in steps:
-        tqdm.write(f"[{code}] {step}...")
+        logger.debug(f"[{code}] {step}...")
         if step == "获取数据":
             # 从缓存行情中取数据
             row = QUOTE_DICT.get(code)
@@ -315,18 +334,26 @@ def check_stock(code):
 
 """多线程选股"""
 def pick_stocks_multithread(max_workers=20, strategy="a"):
+    logger.info(f"开始多线程选股，线程数: {max_workers}, 策略: {strategy}")
     stock_list = load_filter_lists(strategy)
+    logger.info(f"待筛选股票数量: {len(stock_list)}")
+    
+    if stock_list.empty:
+        logger.warning("股票列表为空，无法进行选股")
+        return pd.DataFrame()
+    
     results = []
 
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = [executor.submit(check_stock, code) for code in stock_list['code'].tolist()]
 
         # 在每次执行一个任务后更新进度条
-        for future in tqdm(as_completed(futures), total=len(stock_list), desc="选股中"):
+        for future in tqdm(as_completed(futures), total=len(stock_list), desc="选股中", unit="只"):
             result = future.result()
             if result:
                 results.append(result)
 
+    logger.info(f"选股完成，共选出 {len(results)} 只符合条件的股票")
     return pd.DataFrame(results)
 
 def calculate_technical_score(symbol: str, start_date: str, end_date: str, adjust: str = "qfq") -> float:
@@ -343,9 +370,10 @@ def calculate_technical_score(symbol: str, start_date: str, end_date: str, adjus
     try:
         df = get_stock_history(symbol=symbol, start_date=start_date, end_date=end_date, adjust=adjust)
         if df.empty:
+            logger.warning(f"股票 {symbol} 历史数据为空")
             return 0.0
     except Exception as e:
-        print(f"Error getting stock history for {symbol}: {e}")
+        logger.error(f"获取股票 {symbol} 历史数据失败: {e}")
         return 0.0
 
     # ============ 技术指标 ============
@@ -476,7 +504,7 @@ def get_fundamental_data(code: str) -> Dict[str, Any]:
             # 如果缓存超过30天，需要刷新
             if time_diff.days > 30:
                 need_refresh = True
-                print(f"[INFO] {code} 财务缓存已超过30天，刷新数据...")
+                logger.info(f"{code} 财务缓存已超过30天，刷新数据...")
             else:
                 # 缓存仍然有效，加载缓存数据
                 df = pd.read_csv(cache_file)
@@ -484,7 +512,7 @@ def get_fundamental_data(code: str) -> Dict[str, Any]:
                     df = None
                     need_refresh = True
         except Exception as e:
-            print(f"[WARNING] 读取财务缓存文件 {cache_file} 失败: {e}")
+            logger.warning(f"读取财务缓存文件 {cache_file} 失败: {e}")
             df = None
             need_refresh = True
     else:
@@ -500,10 +528,11 @@ def get_fundamental_data(code: str) -> Dict[str, Any]:
             # 保存到CSV
             try:
                 df.to_csv(cache_file, index=False, encoding="utf-8-sig")
+                logger.debug(f"{code} 财务数据已保存到缓存")
             except Exception as e:
-                print(f"[WARNING] 保存财务缓存文件 {cache_file} 失败: {e}")
+                logger.warning(f"保存财务缓存文件 {cache_file} 失败: {e}")
         except Exception as e:
-            print(f"{code} 财务基本面数据获取失败: {e}")
+            logger.error(f"{code} 财务基本面数据获取失败: {e}")
             return {}
     
     if df.empty:
@@ -538,7 +567,7 @@ def get_fundamental_data(code: str) -> Dict[str, Any]:
         }
         return data_out
     except Exception as e:
-        print(f"{code} 财务基本面数据处理失败: {e}")
+        logger.error(f"{code} 财务基本面数据处理失败: {e}", exc_info=True)
         return {}
    
 """计算基本面评分 (0-100)"""
@@ -660,12 +689,12 @@ def save_and_print_picked(picked: pd.DataFrame, prefix="picked_stocks", folder="
     :param folder: 保存目录
     """
     if picked is None or picked.empty:
-        print("没有选中的股票。")
+        logger.warning("没有选中的股票")
         return
 
     # 打印
-    print("初步选中的股票：")
-    print(picked)
+    logger.info("初步选中的股票：")
+    logger.info(f"\n{picked.to_string()}")
 
     # 文件名加日期
     today_str = datetime.date.today().strftime("%Y%m%d")
@@ -677,16 +706,31 @@ def save_and_print_picked(picked: pd.DataFrame, prefix="picked_stocks", folder="
 
     # 导出
     picked.to_csv(filepath, index=False, encoding="utf-8-sig")
-    print(f"已导出文件：{filepath}")
+    logger.info(f"已导出文件：{filepath}")
 
 if __name__ == "__main__":
+    logger.info("=" * 60)
+    logger.info("开始执行选股程序")
+    logger.info("=" * 60)
+    
     pd.set_option("display.max_rows", None)
+    
+    logger.info("初始化全局数据...")
     init_quote_dict()  # 初始化
 
-    picked = pick_stocks_multithread( max_workers=1, strategy="b")
-    picked = picked.drop_duplicates(subset="代码").reset_index(drop=True)
-    picked = picked.sort_values(by="总分", ascending=False).reset_index(drop=True)
+    logger.info("开始选股流程...")
+    picked = pick_stocks_multithread(max_workers=5, strategy="b")
+    
+    if not picked.empty:
+        logger.info("处理选股结果...")
+        picked = picked.drop_duplicates(subset="代码").reset_index(drop=True)
+        picked = picked.sort_values(by="总分", ascending=False).reset_index(drop=True)
+        logger.info(f"去重和排序完成，最终选出 {len(picked)} 只股票")
 
     save_and_print_picked(picked)
+    
+    logger.info("=" * 60)
+    logger.info("选股程序执行完成")
+    logger.info("=" * 60)
     
     

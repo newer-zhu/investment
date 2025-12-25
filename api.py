@@ -2,6 +2,7 @@ import akshare as ak
 import pandas as pd
 import os
 import datetime
+from logger import logger
 
 
 def get_stock_history(symbol: str, start_date: str, end_date: str, adjust: str = "qfq") -> pd.DataFrame:
@@ -55,10 +56,11 @@ def get_stock_history(symbol: str, start_date: str, end_date: str, adjust: str =
                     df_filtered = df_filtered.sort_values("date").reset_index(drop=True)
                     return df_filtered
         except Exception as e:
-            print(f"[WARNING] 读取缓存文件 {cache_file} 失败: {e}")
+            logger.warning(f"读取缓存文件 {cache_file} 失败: {e}")
             df_cached = None
     
     # 从API获取数据
+    logger.debug(f"获取股票 {symbol} 历史数据: {fetch_start_date} 至 {fetch_end_date}")
     try:
         df_new = ak.stock_zh_a_hist(symbol=symbol, period="daily",
                                     start_date=fetch_start_date, end_date=fetch_end_date, adjust=adjust)
@@ -94,8 +96,9 @@ def get_stock_history(symbol: str, start_date: str, end_date: str, adjust: str =
         # 保存到CSV
         try:
             df_combined.to_csv(cache_file, index=False, encoding="utf-8-sig")
+            logger.debug(f"股票 {symbol} 历史数据已保存到缓存，共 {len(df_combined)} 条记录")
         except Exception as e:
-            print(f"[WARNING] 保存缓存文件 {cache_file} 失败: {e}")
+            logger.warning(f"保存缓存文件 {cache_file} 失败: {e}")
         
         # 返回请求日期范围内的数据
         df_result = df_combined[
@@ -103,10 +106,11 @@ def get_stock_history(symbol: str, start_date: str, end_date: str, adjust: str =
             (df_combined["date"] <= end_dt)
         ].copy()
         
+        logger.debug(f"股票 {symbol} 历史数据获取成功，返回 {len(df_result)} 条记录")
         return df_result.sort_values("date").reset_index(drop=True)
         
     except Exception as e:
-        print(f"[ERROR] 获取股票 {symbol} 历史数据失败: {e}")
+        logger.error(f"获取股票 {symbol} 历史数据失败: {e}", exc_info=True)
         # 如果API调用失败，尝试返回缓存数据
         if df_cached is not None and not df_cached.empty:
             df_filtered = df_cached[
