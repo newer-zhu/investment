@@ -103,9 +103,9 @@ def init_quote_dict():
     global QUOTE_DICT
 
     today_str = pd.Timestamp.now().strftime("%Y-%m-%d")
-    cache_dir = "cache"
-    os.makedirs(cache_dir, exist_ok=True)   # 确保 cache 文件夹存在
-    CACHE_FILE = os.path.join(cache_dir, f"quote_cache_{today_str}.csv")
+    market_cache_dir = os.path.join("cache", "market")
+    os.makedirs(market_cache_dir, exist_ok=True)   # 确保 cache/market 文件夹存在
+    CACHE_FILE = os.path.join(market_cache_dir, f"quote_cache_{today_str}.csv")
 
     if os.path.exists(CACHE_FILE):
         logger.info("使用本地缓存行情数据")
@@ -117,13 +117,60 @@ def init_quote_dict():
         logger.info(f"行情数据拉取完成，共 {len(quote_df)} 条记录，已保存到缓存")
 
     logger.info(f"正在处理行情数据，共 {len(quote_df)} 条...")
+    today_dt = pd.Timestamp.now().normalize()
+    
     for _, row in tqdm(quote_df.iterrows(), total=len(quote_df), desc="加载行情数据", leave=False):
         code = row["代码"]
         QUOTE_DICT[code] = {
             col: parse_number(row[col]) if col not in ["代码", "名称"] else row[col]
             for col in quote_df.columns
         }
-    logger.info(f"行情数据加载完成，共 {len(QUOTE_DICT)} 只股票")
+        
+        # 将今日数据追加到对应的历史缓存文件中
+        try:
+            history_cache_dir = os.path.join("cache", "history")
+            os.makedirs(history_cache_dir, exist_ok=True)
+            history_file = os.path.join(history_cache_dir, f"{code}_history.csv")
+            
+            # 构建今日的历史数据行
+            today_data = {
+                "date": today_dt,
+                "股票代码": code,
+                "开盘": parse_number(row.get("今开", 0)),
+                "close": parse_number(row.get("最新价", 0)),
+                "最高": parse_number(row.get("最高", 0)),
+                "最低": parse_number(row.get("最低", 0)),
+                "成交量": parse_number(row.get("成交量", 0)),
+                "成交额": parse_number(row.get("成交额", 0)),
+                "振幅": parse_number(row.get("振幅", 0)),
+                "涨跌幅": parse_number(row.get("涨跌幅", 0)),
+                "涨跌额": parse_number(row.get("涨跌额", 0)),
+                "换手率": parse_number(row.get("换手率", 0)),
+            }
+            
+            # 检查历史文件是否存在
+            if os.path.exists(history_file):
+                # 读取现有数据
+                df_history = pd.read_csv(history_file)
+                df_history["date"] = pd.to_datetime(df_history["date"])
+                
+                # 检查今天是否已经有数据
+                if df_history["date"].max() < today_dt:
+                    # 追加今日数据
+                    df_new = pd.DataFrame([today_data])
+                    df_combined = pd.concat([df_history, df_new], ignore_index=True)
+                    df_combined = df_combined.sort_values("date").reset_index(drop=True)
+                    df_combined.to_csv(history_file, index=False, encoding="utf-8-sig")
+                # 如果今天已有数据，不重复追加
+            else:
+                # 创建新文件
+                df_new = pd.DataFrame([today_data])
+                df_new.to_csv(history_file, index=False, encoding="utf-8-sig")
+        except Exception as e:
+            # 单个股票追加失败不影响整体流程
+            logger.debug(f"追加股票 {code} 今日数据到历史缓存失败: {e}")
+    
+    logger.info(f"行情数据加载完成，共 {len(QUOTE_DICT)} 只股票，今日数据已同步到历史缓存")
         
     logger.info("开始初始化资金流缓存...")
     init_fund_flow_cache()  
@@ -138,9 +185,9 @@ def init_quote_dict():
 def get_industry_from_cache(code):
     # 首次调用时，从CSV加载缓存
     if not INFO_CACHE:
-        cache_dir = "cache"
-        os.makedirs(cache_dir, exist_ok=True)
-        cache_file = os.path.join(cache_dir, "stock_industry_cache.csv")
+        industry_cache_dir = os.path.join("cache", "industry")
+        os.makedirs(industry_cache_dir, exist_ok=True)
+        cache_file = os.path.join(industry_cache_dir, "stock_industry_cache.csv")
         
         if os.path.exists(cache_file):
             try:
@@ -170,9 +217,9 @@ def get_industry_from_cache(code):
     INFO_CACHE[code] = industry
     
     # 保存到CSV
-    cache_dir = "cache"
-    os.makedirs(cache_dir, exist_ok=True)
-    cache_file = os.path.join(cache_dir, "stock_industry_cache.csv")
+    industry_cache_dir = os.path.join("cache", "industry")
+    os.makedirs(industry_cache_dir, exist_ok=True)
+    cache_file = os.path.join(industry_cache_dir, "stock_industry_cache.csv")
     
     try:
         # 读取现有数据或创建新的DataFrame
@@ -484,11 +531,11 @@ def calculate_technical_score(symbol: str, start_date: str, end_date: str, adjus
 def get_fundamental_data(code: str) -> Dict[str, Any]:
     """获取基本面数据，返回详细指标字典，带CSV缓存（每月自动刷新）"""
     # 创建缓存目录
-    cache_dir = "cache"
-    os.makedirs(cache_dir, exist_ok=True)
+    financial_cache_dir = os.path.join("cache", "financial")
+    os.makedirs(financial_cache_dir, exist_ok=True)
     
     # 使用股票代码作为文件名前缀
-    cache_file = os.path.join(cache_dir, f"{code}_financial.csv")
+    cache_file = os.path.join(financial_cache_dir, f"{code}_financial.csv")
     
     # 检查缓存文件是否存在且是否需要刷新（每月刷新一次）
     need_refresh = False

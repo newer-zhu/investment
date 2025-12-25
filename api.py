@@ -14,7 +14,7 @@ def get_stock_history(symbol: str, start_date: str, end_date: str, adjust: str =
     - 将收盘价转为数值并去除缺失
     """
     # 创建缓存目录
-    cache_dir = "cache"
+    cache_dir = os.path.join("cache", "history")
     os.makedirs(cache_dir, exist_ok=True)
     
     # 使用股票代码作为文件名前缀

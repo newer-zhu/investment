@@ -46,7 +46,7 @@ def find_previous_csv_path() -> str | None:
 
 def find_today_cache_path() -> str:
     today_str = datetime.date.today().strftime("%Y-%m-%d")
-    return os.path.join("cache", f"quote_cache_{today_str}.csv")
+    return os.path.join("cache", "market", f"quote_cache_{today_str}.csv")
 
 
 def _parse_percent_series(s: pd.Series) -> pd.Series:
