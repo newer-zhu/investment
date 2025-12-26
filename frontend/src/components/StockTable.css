@@ -1,0 +1,15 @@
+.stock-table-container {
+  width: 100%;
+}
+
+.table-filters {
+  margin-bottom: 16px;
+  padding: 16px;
+  background: #fafafa;
+  border-radius: 8px;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 16px;
+}
+
