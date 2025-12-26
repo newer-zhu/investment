@@ -7,8 +7,7 @@ import sys
 import threading
 import schedule
 import pandas as pd
-from utils import is_trading_day,send_email, load_config_from_ini, find_csv_for_today_or_latest, selected_stocks_to_html,csv_to_html_table
-from analyze_stocks import get_prev_portfolio_avg_message
+from utils import is_trading_day,send_email, load_config_from_ini, find_csv_for_today_or_latest, selected_stocks_to_html,csv_to_html_table, get_prev_portfolio_avg_message
 import akshare as ak
 from api import get_stock_history
 from logger import logger
