@@ -30,6 +30,7 @@ QUOTE_DICT = {}
 HALF_YEAR_HIGH_SET = set()
 # 量价齐跌
 ljqd_blacklist = set()
+today_str_YYYYMMDD = datetime.date.today().strftime("%Y%m%d")
 
 """
 加载连续量价齐跌的黑名单股票到全局 set
@@ -263,7 +264,7 @@ def load_filter_lists(in_stock):
     # 停牌股
     logger.debug("加载停牌股列表...")
     try:
-        suspension_codes = set(ak.news_trade_notify_suspend_baidu()['股票代码'].astype(str))
+        suspension_codes = set(ak.news_trade_notify_suspend_baidu(today_str_YYYYMMDD)['股票代码'].astype(str))
         logger.debug(f"加载停牌股完成，共 {len(suspension_codes)} 只")
     except Exception as e:
         logger.warning(f"加载停牌股失败: {e}")
