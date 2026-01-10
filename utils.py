@@ -15,6 +15,16 @@ from logger import logger
 OUTPUT_FOLDER = "output"
 FILENAME_PREFIX = "picked_stocks"
 
+def _to_qlib_instrument(code: str) -> str:
+    """
+    600000 -> SH600000
+    000001 -> SZ000001
+    """
+    code = str(code).strip()
+    code = "".join(filter(str.isdigit, code)).zfill(6)
+    prefix = "SH" if code.startswith("6") else "SZ"
+    return prefix + code
+
 def load_config_from_ini(section: str,
                          path: str | None = None,
                          config_path_env: str = "EMAIL_JOB_CONFIG",

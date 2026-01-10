@@ -6,7 +6,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import os
 import datetime
 from typing import Dict, Any
-from utils import parse_number, safe_get, is_industry, get_latest_quarter, load_config_from_ini
+from utils import parse_number, safe_get, is_industry, get_latest_quarter, load_config_from_ini, _to_qlib_instrument
 from logger import logger
 
 
@@ -32,6 +32,7 @@ HALF_YEAR_HIGH_SET = set()
 ljqd_blacklist = set()
 today_str_YYYYMMDD = datetime.date.today().strftime("%Y%m%d")
 
+QLIB_POOL_DIR = r"F:\Code\investment\investment-qlib\data\stock_pool\processed"
 """
 加载连续量价齐跌的黑名单股票到全局 set
 """
@@ -714,33 +715,56 @@ def calculate_fundamental_score(code: str, industry: str) -> float:
 
     return float(min(100.0, max(0.0, score)))
 
-def save_and_print_picked(picked: pd.DataFrame, prefix="picked_stocks", folder="output"):
+
+
+
+def save_and_print_picked(
+    picked: pd.DataFrame,
+    prefix="picked_stocks",
+    folder="output",
+    code_column="代码",
+):
     """
-    打印并导出选中的股票列表
-    :param picked: DataFrame 股票数据
-    :param prefix: 文件名前缀
-    :param folder: 保存目录
+    打印并导出选中的股票列表（人类可读 + qlib 股票池）
     """
     if picked is None or picked.empty:
         logger.warning("没有选中的股票")
         return
 
-    # 打印
+    # ========= 1. 打印 =========
     logger.info("初步选中的股票：")
     logger.info(f"\n{picked.to_string()}")
 
-    # 文件名加日期
-    today_str = datetime.date.today().strftime("%Y%m%d")
-    filename = f"{prefix}_{today_str}.csv"
+    # ========= 2. 普通 CSV 导出 =========
+    today = datetime.date.today()
+    today_str = today.strftime("%Y%m%d")
 
-    # 确保目录存在
     os.makedirs(folder, exist_ok=True)
-    filepath = os.path.join(folder, filename)
+    normal_path = os.path.join(folder, f"{prefix}_{today_str}.csv")
 
-    # 导出
-    picked.to_csv(filepath, index=False, encoding="utf-8-sig")
-    logger.info(f"已导出文件：{filepath}")
+    picked.to_csv(normal_path, index=False, encoding="utf-8-sig")
+    logger.info(f"已导出文件：{normal_path}")
 
+    # ========= 3. qlib 股票池导出 =========
+    if code_column not in picked.columns:
+        raise ValueError(f"未找到股票代码列: {code_column}")
+
+    instruments = picked[code_column].map(_to_qlib_instrument)
+
+    qlib_pool_df = pd.DataFrame({
+        "instrument": instruments
+    }).drop_duplicates()
+
+    qlib_date = today.strftime("%Y-%m-%d")
+    os.makedirs(QLIB_POOL_DIR, exist_ok=True)
+    qlib_path = os.path.join(
+        QLIB_POOL_DIR,
+        f"{qlib_date}_pool.csv"
+    )
+
+    qlib_pool_df.to_csv(qlib_path, index=False, encoding="utf-8")
+    logger.info(f"已导出 qlib 股票池：{qlib_path}")
+    
 if __name__ == "__main__":
     logger.info("=" * 60)
     logger.info("开始执行选股程序")
