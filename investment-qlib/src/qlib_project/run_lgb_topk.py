@@ -128,22 +128,35 @@ def run_lgb_topk(
         strategy=strategy,
         executor=executor
     )
-    # -------- 保存结果 --------
+# -------- 保存结果 --------
     RESULT_DIR.mkdir(parents=True, exist_ok=True)
 
     report_path = RESULT_DIR / f"report_{pool_date}.csv"
     pos_path = RESULT_DIR / f"positions_{pool_date}.csv"
 
-    report.to_csv(report_path)
-    # positions 是 dict 格式，包含具体持仓明细，转为 DataFrame 保存
-    pd.concat(positions, axis=0).to_csv(pos_path)
+    # 1. 处理 report 字典
+    # report 包含：'excess_return_without_cost', 'return_indicator' 等
+    # 我们提取每日的具体指标 (DataFrame)
+    if isinstance(report, dict):
+        # 提取收益指标表格
+        report_df = report.get("return_indicator", pd.DataFrame())
+        if report_df.empty and "excess_return_without_cost" in report:
+             report_df = report["excess_return_without_cost"]
+        report_df.to_csv(report_path)
+    else:
+        report.to_csv(report_path)
 
-    print("-" * 30)
-    print(f"[OK] 回测完成: {pool_date}")
-    print(f"结果报告: {report_path}")
-    print(f"持仓明细: {pos_path}")
-    
-    return report, positions
+    # 2. 处理 positions 字典
+    # positions 键是日期，值是该日的持仓 DataFrame
+    if isinstance(positions, dict):
+        try:
+            pd.concat(positions, axis=0).to_csv(pos_path)
+        except Exception:
+            # 如果无法直接 concat（格式不统一），则转为字符串保存以防崩溃
+            with open(pos_path, "w") as f:
+                f.write(str(positions))
+    else:
+        positions.to_csv(pos_path)
 
 # ================== 4. 执行入口 ==================
 def main():
