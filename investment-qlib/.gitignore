@@ -10,3 +10,7 @@ venv/
 .ipynb_checkpoints/
 data/
 logs/
+qlib/
+qlib_env/
+mlruns/
+mnt/
