@@ -8,6 +8,8 @@ import datetime
 from typing import Dict, Any
 from utils import parse_number, safe_get, is_industry, get_latest_quarter, load_config_from_ini, _to_qlib_instrument
 from logger import logger
+from pathlib import Path
+
 
 
 # 全局资金上限（单位：元）
@@ -32,7 +34,8 @@ HALF_YEAR_HIGH_SET = set()
 ljqd_blacklist = set()
 today_str_YYYYMMDD = datetime.date.today().strftime("%Y%m%d")
 
-QLIB_POOL_DIR = r"F:\Code\investment\investment-qlib\data\stock_pool\processed"
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+QLIB_POOL_DIR = PROJECT_ROOT / "investment-qlib" / "data" / "stock_pool" / "processed"
 """
 加载连续量价齐跌的黑名单股票到全局 set
 """

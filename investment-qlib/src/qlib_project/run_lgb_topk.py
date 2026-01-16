@@ -18,7 +18,7 @@ from qlib.backtest import backtest
 
 # 路径配置
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
-DATA_PATH = PROJECT_ROOT / "data" / "source" / "qlib_bin"
+DATA_PATH = PROJECT_ROOT / "data" / "source"
 POOL_BASE_DIR = PROJECT_ROOT / "data" / "stock_pool" / "processed"
 RESULT_DIR = PROJECT_ROOT / "data" / "pool_results_lgb"
 
@@ -31,11 +31,6 @@ def init_env():
         provider_uri=str(DATA_PATH),
         region=REG_CN,
     )
-    
-    # --- 核心修复：禁用多进程 ---
-    C["workers"] = 1
-    C["joblib_backend"] = "sequential"
-    print(f"系统初始化成功：已强制设为单进程模式以兼容中文路径。")
 
 # ================== 2. 工具函数 ==================
 def load_pool(pool_csv: Path) -> list[str]:
@@ -58,7 +53,7 @@ def run_lgb_topk(
     start_date: str,
     end_date: str,
     test_start: str,
-    topk: int = 10,
+    topk: int = 3,
 ):
     # 初始化
     init_env()
@@ -162,11 +157,11 @@ def run_lgb_topk(
 def main():
     try:
         run_lgb_topk(
-            pool_date="2025-12-24",
-            start_date="2024-01-01",
-            end_date="2026-01-08",
-            test_start="2026-01-01",
-            topk=10,
+            pool_date="2026-01-15",
+            start_date="2024-01-01", 
+            end_date="2026-01-15",
+            test_start="2025-11-01",  # 改为从 11 月开始，跑两个月
+            topk=3,
         )
     except Exception as e:
         print(f"程序运行出错: {e}")

@@ -14,3 +14,4 @@ qlib/
 qlib_env/
 mlruns/
 mnt/
+*.dolt/
