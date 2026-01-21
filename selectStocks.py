@@ -35,7 +35,7 @@ ljqd_blacklist = set()
 today_str_YYYYMMDD = datetime.date.today().strftime("%Y%m%d")
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-QLIB_POOL_DIR = PROJECT_ROOT / "investment-qlib" / "data" / "stock_pool" / "processed"
+QLIB_POOL_DIR = PROJECT_ROOT / "investment" / "investment-qlib" / "data" / "stock_pool" / "processed"
 """
 加载连续量价齐跌的黑名单股票到全局 set
 """
