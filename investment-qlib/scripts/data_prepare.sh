@@ -1,0 +1,1 @@
+tar -zxvf investment-qlib/data/source/qlib_bin.tar.gz -C investment-qlib/data/source/ --strip-components=1

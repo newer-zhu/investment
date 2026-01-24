@@ -115,5 +115,5 @@ if __name__ == "__main__":
         start_date="2025-01-01",
         end_date="2026-01-15",
         test_start="2025-11-01",
-        topk=15,
+        topk=10,
     )
