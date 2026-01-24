@@ -9,6 +9,9 @@ from typing import Dict, Any
 from utils import parse_number, safe_get, is_industry, get_latest_quarter, load_config_from_ini, _to_qlib_instrument
 from logger import logger
 from pathlib import Path
+import glob
+import re
+from collections import Counter, defaultdict
 
 
 
@@ -768,6 +771,81 @@ def save_and_print_picked(
     qlib_pool_df.to_csv(qlib_path, index=False, encoding="utf-8")
     logger.info(f"已导出 qlib 股票池：{qlib_path}")
     
+
+def generate_final_stocks(output_dir: str = "output", top_n: int = 50, out_file: str = "final_stocks.csv"):
+    """
+    从 `output` 目录下所有 `picked_stocks_YYYYMMDD.csv` 文件中统计股票出现次数，
+    选取出现次数前 `top_n` 的股票（按次数降序），然后使用每只股票在最新文件中的记录，
+    最后按 `总分` 降序输出到 `output/final_stocks.csv`。
+    """
+    os.makedirs(output_dir, exist_ok=True)
+
+    pattern = os.path.join(output_dir, "picked_stocks_*.csv")
+    files = glob.glob(pattern)
+    if not files:
+        logger.warning(f"未找到任何匹配文件: {pattern}")
+        return None
+
+    # 统计出现次数，并记录每个代码在最新日期的行
+    counts = Counter()
+    latest_record = {}
+
+    for fp in files:
+        # 从文件名中提取日期 例如 picked_stocks_20260123.csv
+        m = re.search(r"(\d{8})", os.path.basename(fp))
+        date_int = int(m.group(1)) if m else 0
+
+        try:
+            df = pd.read_csv(fp, dtype={"代码": str}, encoding="utf-8-sig")
+        except Exception:
+            try:
+                df = pd.read_csv(fp, dtype={"代码": str})
+            except Exception as e:
+                logger.warning(f"读取文件失败 {fp}: {e}")
+                continue
+
+        if df.empty or "代码" not in df.columns:
+            continue
+
+        for _, row in df.iterrows():
+            code = str(row.get("代码", "")).zfill(6)
+            counts[code] += 1
+
+            prev = latest_record.get(code)
+            if (prev is None) or (date_int > prev[0]):
+                latest_record[code] = (date_int, row)
+
+    if not counts:
+        logger.warning("没有统计到任何股票出现次数")
+        return None
+
+    # 取出现次数前 top_n（按次数降序），结果为代码列表
+    top_codes = [code for code, _ in counts.most_common(top_n)]
+
+    rows = []
+    for code in top_codes:
+        rec = latest_record.get(code)
+        if rec is None:
+            continue
+        rows.append(rec[1])
+
+    if not rows:
+        logger.warning("没有找到 top 股票的记录")
+        return None
+
+    final_df = pd.DataFrame(rows)
+
+    # 确保总分为数值，可能存在字符串
+    if "总分" in final_df.columns:
+        final_df["总分"] = pd.to_numeric(final_df["总分"], errors="coerce").fillna(0)
+
+    final_df = final_df.sort_values(by="总分", ascending=False).reset_index(drop=True)
+
+    out_path = os.path.join(output_dir, out_file)
+    final_df.to_csv(out_path, index=False, encoding="utf-8-sig")
+    logger.info(f"已生成最终选股文件: {out_path}")
+    return out_path
+
 if __name__ == "__main__":
     logger.info("=" * 60)
     logger.info("开始执行选股程序")
