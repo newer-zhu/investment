@@ -750,26 +750,7 @@ def save_and_print_picked(
 
     picked.to_csv(normal_path, index=False, encoding="utf-8-sig")
     logger.info(f"已导出文件：{normal_path}")
-
-    # ========= 3. qlib 股票池导出 =========
-    if code_column not in picked.columns:
-        raise ValueError(f"未找到股票代码列: {code_column}")
-
-    instruments = picked[code_column].map(_to_qlib_instrument)
-
-    qlib_pool_df = pd.DataFrame({
-        "instrument": instruments
-    }).drop_duplicates()
-
-    qlib_date = today.strftime("%Y-%m-%d")
-    os.makedirs(QLIB_POOL_DIR, exist_ok=True)
-    qlib_path = os.path.join(
-        QLIB_POOL_DIR,
-        f"{qlib_date}_pool.csv"
-    )
-
-    qlib_pool_df.to_csv(qlib_path, index=False, encoding="utf-8")
-    logger.info(f"已导出 qlib 股票池：{qlib_path}")
+    generate_final_stocks()
     
 
 def generate_final_stocks(output_dir: str = "output", top_n: int = 50, out_file: str = "final_stocks.csv"):
@@ -844,6 +825,17 @@ def generate_final_stocks(output_dir: str = "output", top_n: int = 50, out_file:
     out_path = os.path.join(output_dir, out_file)
     final_df.to_csv(out_path, index=False, encoding="utf-8-sig")
     logger.info(f"已生成最终选股文件: {out_path}")
+    
+    # ========= 2. 生成 qlib 股票池 =========
+    instruments = final_df["代码"].map(_to_qlib_instrument)
+    qlib_pool_df = pd.DataFrame({"instrument": instruments}).drop_duplicates()
+
+    qlib_date = datetime.date.today().strftime("%Y-%m-%d")
+    os.makedirs(QLIB_POOL_DIR, exist_ok=True)
+    qlib_path = os.path.join(QLIB_POOL_DIR, f"{qlib_date}_pool.csv")
+    qlib_pool_df.to_csv(qlib_path, index=False, encoding="utf-8")
+    logger.info(f"已导出 qlib 股票池：{qlib_path}")
+
     return out_path
 
 if __name__ == "__main__":
