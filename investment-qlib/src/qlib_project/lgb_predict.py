@@ -70,11 +70,12 @@ def run_lgb_predict_only(
     print("训练 LightGBM...")
     model = LGBModel(
         loss="mse",
-        n_estimators=200,
-        learning_rate=0.05,
+        n_estimators=500,      # 增加树的数量
+        learning_rate=0.01,    # 减小步长，更平滑
         max_depth=6,
-        n_jobs=1,
+        n_jobs=-1,
     )
+
     model.fit(dataset)
 
     # ---------- 预测 ----------
@@ -111,9 +112,9 @@ def run_lgb_predict_only(
 # ================== 5. 入口 ==================
 if __name__ == "__main__":
     run_lgb_predict_only(
-        pool_date="2026-01-15",
-        start_date="2025-01-01",
-        end_date="2026-01-15",
+        pool_date="2026-01-23",
+        start_date="2024-07-01",
+        end_date="2026-01-23",
         test_start="2025-11-01",
         topk=10,
     )
