@@ -12,13 +12,13 @@ from qlib.data.dataset import DatasetH
 from qlib.contrib.data.handler import Alpha158
 from qlib.contrib.model.gbdt import LGBModel
 
-# --- [新增代码] 自定义 5日 预测处理器 ---
+# --- [新增代码] 自定义 3日 预测处理器 ---
 class Alpha158_5Day(Alpha158):
     def get_label_config(self):
         # 解释：Ref($close, -6) / Ref($close, -1) - 1
         # 含义：(T+6收盘价 / T+1收盘价) - 1
         # 即：如果你在明天(T+1)收盘买入，持有5个交易日后的收益率
-        return (["Ref($close, -6) / Ref($close, -1) - 1"], ["LABEL0"])
+        return (["Ref($close, -4) / Ref($close, -1) - 1"], ["LABEL0"])
 # ================== 2. 路径配置 ==================
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DATA_PATH = PROJECT_ROOT / "data" / "source"

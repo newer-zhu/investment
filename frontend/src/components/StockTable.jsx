@@ -72,8 +72,9 @@ function StockTable({ stocks }) {
       width: 110,
       sorter: (a, b) => a.change - b.change,
       render: (change) => {
-        const color = change > 0 ? '#ff4d4f' : change < 0 ? '#52c41a' : '#999'
-        return <Text style={{ color, fontWeight: 'bold' }}>{formatPercent(change)}</Text>
+        // 中国股市：红色涨，绿色跌
+        const color = change > 0 ? '#ff4d4f' : change < 0 ? '#52c41a' : '#a0aec0'
+        return <Text style={{ color, fontWeight: 'bold', fontSize: '14px' }}>{formatPercent(change)}</Text>
       },
     },
     {
@@ -91,8 +92,9 @@ function StockTable({ stocks }) {
       width: 110,
       sorter: (a, b) => a.ytdChange - b.ytdChange,
       render: (ytdChange) => {
-        const color = ytdChange > 0 ? '#ff4d4f' : ytdChange < 0 ? '#52c41a' : '#999'
-        return <Text style={{ color, fontWeight: 'bold' }}>{formatPercent(ytdChange)}</Text>
+        // 中国股市：红色涨，绿色跌
+        const color = ytdChange > 0 ? '#ff4d4f' : ytdChange < 0 ? '#52c41a' : '#a0aec0'
+        return <Text style={{ color, fontWeight: 'bold', fontSize: '14px' }}>{formatPercent(ytdChange)}</Text>
       },
     },
     {
@@ -127,7 +129,11 @@ function StockTable({ stocks }) {
       sorter: (a, b) => a.totalScore - b.totalScore,
       defaultSortOrder: 'descend',
       render: (score) => (
-        <Text strong style={{ color: '#1890ff', fontSize: '16px' }}>
+        <Text strong style={{ 
+          color: score >= 20 ? '#52c41a' : score >= 10 ? '#faad14' : '#ff4d4f',
+          fontSize: '16px',
+          fontWeight: 700
+        }}>
           {score.toFixed(1)}
         </Text>
       ),

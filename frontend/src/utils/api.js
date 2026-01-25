@@ -39,3 +39,20 @@ export async function getStocksByDate(date) {
   }
 }
 
+/**
+ * 获取最终选股数据
+ */
+export async function getFinalStocks() {
+  try {
+    const response = await fetch(`${API_BASE_URL}/api/final-stocks`)
+    if (!response.ok) {
+      throw new Error(`HTTP error! status: ${response.status}`)
+    }
+    const data = await response.json()
+    return data.stocks || []
+  } catch (error) {
+    console.error('获取最终选股数据失败:', error)
+    throw error
+  }
+}
+

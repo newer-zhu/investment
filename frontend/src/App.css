@@ -1,56 +1,171 @@
+/* 量化系统主题配色 */
+:root {
+  --primary-color: #1890ff;
+  --success-color: #52c41a;
+  --error-color: #ff4d4f;
+  --warning-color: #faad14;
+  --bg-dark: #0a0e27;
+  --bg-card: #1a1f3a;
+  --bg-hover: #252b4a;
+  --text-primary: #ffffff;
+  --text-secondary: #a0aec0;
+  --border-color: #2d3748;
+  --shadow: 0 4px 20px rgba(0, 0, 0, 0.3);
+}
+
 .app-layout {
   min-height: 100vh;
-  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+  background: linear-gradient(135deg, #0a0e27 0%, #1a1f3a 50%, #0f1419 100%);
+  background-attachment: fixed;
 }
 
 .app-header {
-  background: rgba(255, 255, 255, 0.1);
-  backdrop-filter: blur(10px);
-  padding: 0 50px;
+  background: rgba(26, 31, 58, 0.95);
+  backdrop-filter: blur(20px);
+  padding: 0 24px;
   display: flex;
   align-items: center;
-  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+  box-shadow: 0 2px 16px rgba(0, 0, 0, 0.5);
+  border-bottom: 1px solid var(--border-color);
+  position: sticky;
+  top: 0;
+  z-index: 1000;
 }
 
 .header-content {
   display: flex;
   align-items: center;
-  gap: 16px;
+  gap: 32px;
   width: 100%;
+  max-width: 1600px;
+  margin: 0 auto;
 }
 
-.header-icon {
+.logo-section {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding-right: 32px;
+  border-right: 1px solid var(--border-color);
+  min-width: 200px;
+}
+
+.logo-icon {
   font-size: 32px;
-  color: white;
+  color: var(--primary-color);
+  background: linear-gradient(135deg, #1890ff 0%, #096dd9 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+  filter: drop-shadow(0 0 8px rgba(24, 144, 255, 0.5));
 }
 
-.header-title {
-  color: white !important;
-  margin: 0 !important;
-  font-weight: 600;
+.logo-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
 }
 
-.header-subtitle {
-  color: rgba(255, 255, 255, 0.9);
-  font-size: 16px;
-  margin-left: auto;
+.system-name {
+  font-size: 20px;
+  font-weight: 700;
+  color: var(--text-primary);
+  letter-spacing: 1px;
+  background: linear-gradient(135deg, #ffffff 0%, #a0aec0 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+.system-subtitle {
+  font-size: 11px;
+  color: var(--text-secondary);
+  letter-spacing: 2px;
+  text-transform: uppercase;
+  font-weight: 500;
+}
+
+.main-menu {
+  flex: 1;
+  min-width: 0;
+  background: transparent !important;
+  border-bottom: none !important;
+  line-height: 64px;
+}
+
+.main-menu .ant-menu-item {
+  color: var(--text-secondary);
+  border-bottom: 2px solid transparent;
+  margin: 0 8px;
+  transition: all 0.3s;
+}
+
+.main-menu .ant-menu-item:hover {
+  color: var(--text-primary);
+  border-bottom-color: var(--primary-color);
+}
+
+.main-menu .ant-menu-item-selected {
+  color: var(--text-primary);
+  border-bottom-color: var(--primary-color);
+  background: transparent !important;
+}
+
+.main-menu .ant-menu-item a {
+  color: inherit;
+  font-weight: 500;
+}
+
+.main-menu .ant-menu-item-selected a {
+  color: var(--text-primary);
 }
 
 .app-content {
   padding: 24px;
   max-width: 1600px;
   margin: 0 auto;
+  width: 100%;
 }
 
 .main-card {
   border-radius: 12px;
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+  box-shadow: var(--shadow);
+  background: var(--bg-card);
+  border: 1px solid var(--border-color);
+  overflow: hidden;
+}
+
+.main-card .ant-card-body {
+  background: var(--bg-card);
+  padding: 24px;
 }
 
 .date-selector {
   margin-bottom: 24px;
   display: flex;
   align-items: center;
+  padding: 16px;
+  background: rgba(26, 31, 58, 0.5);
+  border-radius: 8px;
+  border: 1px solid var(--border-color);
+}
+
+.date-selector .ant-typography {
+  color: var(--text-secondary);
+}
+
+.date-selector .ant-select {
+  min-width: 200px;
+}
+
+.date-selector .ant-select-selector {
+  background: rgba(10, 14, 39, 0.8) !important;
+  border-color: var(--border-color) !important;
+  color: var(--text-primary) !important;
+}
+
+.date-selector .ant-select-selection-item {
+  color: var(--text-primary) !important;
 }
 
 .loading-container {
@@ -58,3 +173,58 @@
   padding: 60px 20px;
 }
 
+.loading-container .ant-spin-text {
+  color: var(--text-secondary);
+}
+
+/* 全局样式覆盖 */
+.ant-card {
+  background: var(--bg-card);
+  border-color: var(--border-color);
+}
+
+.ant-card-head {
+  background: rgba(26, 31, 58, 0.5);
+  border-bottom-color: var(--border-color);
+}
+
+.ant-card-head-title {
+  color: var(--text-primary);
+}
+
+.ant-alert {
+  background: rgba(26, 31, 58, 0.8);
+  border-color: var(--border-color);
+}
+
+.ant-alert-message {
+  color: var(--text-primary);
+}
+
+.ant-alert-description {
+  color: var(--text-secondary);
+}
+
+/* 响应式设计 */
+@media (max-width: 768px) {
+  .logo-section {
+    min-width: auto;
+    padding-right: 16px;
+  }
+  
+  .system-name {
+    font-size: 16px;
+  }
+  
+  .system-subtitle {
+    font-size: 9px;
+  }
+  
+  .logo-icon {
+    font-size: 24px;
+  }
+  
+  .header-content {
+    gap: 16px;
+  }
+}

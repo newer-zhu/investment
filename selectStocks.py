@@ -756,8 +756,7 @@ def save_and_print_picked(
 def generate_final_stocks(output_dir: str = "output", top_n: int = 50, out_file: str = "final_stocks.csv"):
     """
     从 `output` 目录下所有 `picked_stocks_YYYYMMDD.csv` 文件中统计股票出现次数，
-    选取出现次数前 `top_n` 的股票（按次数降序），然后使用每只股票在最新文件中的记录，
-    最后按 `总分` 降序输出到 `output/final_stocks.csv`。
+    选取出现次数前 `top_n` 的股票（按次数降序），生成 qlib 股票池。
     """
     os.makedirs(output_dir, exist_ok=True)
 
@@ -803,31 +802,12 @@ def generate_final_stocks(output_dir: str = "output", top_n: int = 50, out_file:
     # 取出现次数前 top_n（按次数降序），结果为代码列表
     top_codes = [code for code, _ in counts.most_common(top_n)]
 
-    rows = []
-    for code in top_codes:
-        rec = latest_record.get(code)
-        if rec is None:
-            continue
-        rows.append(rec[1])
-
-    if not rows:
-        logger.warning("没有找到 top 股票的记录")
+    if not top_codes:
+        logger.warning("没有找到 top 股票")
         return None
-
-    final_df = pd.DataFrame(rows)
-
-    # 确保总分为数值，可能存在字符串
-    if "总分" in final_df.columns:
-        final_df["总分"] = pd.to_numeric(final_df["总分"], errors="coerce").fillna(0)
-
-    final_df = final_df.sort_values(by="总分", ascending=False).reset_index(drop=True)
-
-    out_path = os.path.join(output_dir, out_file)
-    final_df.to_csv(out_path, index=False, encoding="utf-8-sig")
-    logger.info(f"已生成最终选股文件: {out_path}")
     
-    # ========= 2. 生成 qlib 股票池 =========
-    instruments = final_df["代码"].map(_to_qlib_instrument)
+    # ========= 生成 qlib 股票池 =========
+    instruments = pd.Series(top_codes).map(_to_qlib_instrument)
     qlib_pool_df = pd.DataFrame({"instrument": instruments}).drop_duplicates()
 
     qlib_date = datetime.date.today().strftime("%Y-%m-%d")
@@ -836,7 +816,7 @@ def generate_final_stocks(output_dir: str = "output", top_n: int = 50, out_file:
     qlib_pool_df.to_csv(qlib_path, index=False, encoding="utf-8")
     logger.info(f"已导出 qlib 股票池：{qlib_path}")
 
-    return out_path
+    return qlib_path
 
 if __name__ == "__main__":
     logger.info("=" * 60)

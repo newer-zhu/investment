@@ -5,11 +5,153 @@
 .table-filters {
   margin-bottom: 16px;
   padding: 16px;
-  background: #fafafa;
+  background: rgba(26, 31, 58, 0.5);
   border-radius: 8px;
+  border: 1px solid var(--border-color, #2d3748);
   display: flex;
   align-items: center;
   flex-wrap: wrap;
   gap: 16px;
 }
 
+.table-filters .ant-typography {
+  color: var(--text-secondary, #a0aec0);
+  font-weight: 500;
+}
+
+.table-filters .ant-select {
+  min-width: 150px;
+}
+
+.table-filters .ant-select-selector {
+  background: rgba(10, 14, 39, 0.8) !important;
+  border-color: var(--border-color, #2d3748) !important;
+}
+
+.table-filters .ant-select-selection-item {
+  color: var(--text-primary, #ffffff) !important;
+}
+
+.table-filters .ant-input-number {
+  background: rgba(10, 14, 39, 0.8) !important;
+  border-color: var(--border-color, #2d3748) !important;
+}
+
+.table-filters .ant-input-number-input {
+  color: var(--text-primary, #ffffff) !important;
+}
+
+/* 表格样式 */
+.stock-table-container .ant-table {
+  background: transparent;
+  color: var(--text-primary, #ffffff);
+}
+
+.stock-table-container .ant-table-thead > tr > th {
+  background: rgba(26, 31, 58, 0.8) !important;
+  border-bottom: 2px solid var(--border-color, #2d3748) !important;
+  color: var(--text-primary, #ffffff) !important;
+  font-weight: 600;
+  font-size: 13px;
+  text-align: center;
+}
+
+.stock-table-container .ant-table-tbody > tr {
+  background: rgba(26, 31, 58, 0.3);
+  transition: all 0.2s;
+}
+
+.stock-table-container .ant-table-tbody > tr:hover {
+  background: rgba(24, 144, 255, 0.1) !important;
+  transform: translateY(-1px);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.2);
+}
+
+.stock-table-container .ant-table-tbody > tr > td {
+  border-bottom: 1px solid var(--border-color, #2d3748) !important;
+  color: var(--text-primary, #ffffff) !important;
+  padding: 12px 16px;
+}
+
+.stock-table-container .ant-table-tbody > tr:last-child > td {
+  border-bottom: none !important;
+}
+
+/* 分页器样式 */
+.stock-table-container .ant-pagination {
+  margin-top: 24px;
+  text-align: right;
+}
+
+.stock-table-container .ant-pagination-item {
+  background: rgba(26, 31, 58, 0.8) !important;
+  border-color: var(--border-color, #2d3748) !important;
+}
+
+.stock-table-container .ant-pagination-item a {
+  color: var(--text-secondary, #a0aec0) !important;
+}
+
+.stock-table-container .ant-pagination-item-active {
+  background: var(--primary-color, #1890ff) !important;
+  border-color: var(--primary-color, #1890ff) !important;
+}
+
+.stock-table-container .ant-pagination-item-active a {
+  color: var(--text-primary, #ffffff) !important;
+}
+
+.stock-table-container .ant-pagination-prev,
+.stock-table-container .ant-pagination-next {
+  background: rgba(26, 31, 58, 0.8) !important;
+  border-color: var(--border-color, #2d3748) !important;
+}
+
+.stock-table-container .ant-pagination-prev a,
+.stock-table-container .ant-pagination-next a {
+  color: var(--text-secondary, #a0aec0) !important;
+}
+
+.stock-table-container .ant-pagination-options {
+  color: var(--text-secondary, #a0aec0);
+}
+
+.stock-table-container .ant-select-selector {
+  background: rgba(10, 14, 39, 0.8) !important;
+  border-color: var(--border-color, #2d3748) !important;
+}
+
+.stock-table-container .ant-select-selection-item {
+  color: var(--text-primary, #ffffff) !important;
+}
+
+/* Tag 标签样式 */
+.stock-table-container .ant-tag {
+  background: rgba(24, 144, 255, 0.2);
+  border-color: var(--primary-color, #1890ff);
+  color: var(--primary-color, #1890ff);
+  font-weight: 500;
+}
+
+/* 代码样式 */
+.stock-table-container code {
+  background: rgba(24, 144, 255, 0.1);
+  border: 1px solid rgba(24, 144, 255, 0.3);
+  color: var(--primary-color, #1890ff);
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-family: 'Monaco', 'Menlo', 'Ubuntu Mono', monospace;
+}
+
+/* 涨跌颜色 */
+.stock-table-container .ant-typography {
+  color: var(--text-primary, #ffffff);
+}
+
+/* 响应式 */
+@media (max-width: 1200px) {
+  .table-filters {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+}
