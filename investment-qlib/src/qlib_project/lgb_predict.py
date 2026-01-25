@@ -113,7 +113,7 @@ def run_lgb_predict_only(
 if __name__ == "__main__":
     run_lgb_predict_only(
         pool_date="2026-01-23",
-        start_date="2024-07-01",
+        start_date="2023-07-01",
         end_date="2026-01-23",
         test_start="2025-11-01",
         topk=10,
