@@ -12,13 +12,13 @@ from qlib.data.dataset import DatasetH
 from qlib.contrib.data.handler import Alpha158
 from qlib.contrib.model.gbdt import LGBModel
 
-# --- [新增代码] 自定义 3日 预测处理器 ---
-class Alpha158_5Day(Alpha158):
+# --- [新增代码] 自定义 4日 预测处理器 ---
+class Alpha158_4Day(Alpha158):
     def get_label_config(self):
         # 解释：Ref($close, -6) / Ref($close, -1) - 1
         # 含义：(T+6收盘价 / T+1收盘价) - 1
-        # 即：如果你在明天(T+1)收盘买入，持有5个交易日后的收益率
-        return (["Ref($close, -4) / Ref($close, -1) - 1"], ["LABEL0"])
+        # 即：如果你在明天(T+1)收盘买入，持有4个交易日后的收益率
+        return (["Ref($close, -5) / Ref($close, -1) - 1"], ["LABEL0"])
 # ================== 2. 路径配置 ==================
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DATA_PATH = PROJECT_ROOT / "data" / "source"
@@ -58,7 +58,7 @@ def run_lgb_predict_only(
 
     # ---------- 特征工程 ----------
     print("构建 Alpha158 特征...")
-    handler = Alpha158_5Day(
+    handler = Alpha158_4Day(
         instruments=instruments,
         start_time=start_date,
         end_time=end_date,
@@ -121,9 +121,9 @@ def run_lgb_predict_only(
 # ================== 5. 入口 ==================
 if __name__ == "__main__":
     run_lgb_predict_only(
-        pool_date="2026-01-23",
-        start_date="2023-07-01",
-        end_date="2026-01-23",
-        test_start="2025-11-01",
+        pool_date="2026-01-26",
+        start_date="2024-05-01",
+        end_date="2026-01-26",
+        test_start="2025-10-01",
         topk=10,
     )
