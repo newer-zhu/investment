@@ -41,13 +41,8 @@ def get_stock_history(symbol: str, start_date: str, end_date: str, adjust: str =
                 cached_start = df_cached["date"].min()
                 cached_end = df_cached["date"].max()
                 
-                # 如果缓存数据覆盖了所需的开始日期，且最后日期不是今天
-                if cached_start <= start_dt and cached_end < today_dt:
-                    # 只需要获取从缓存最后日期到今天的数据
-                    fetch_start_date = (cached_end + pd.Timedelta(days=1)).strftime("%Y%m%d")
-                    fetch_end_date = end_date
-                    need_full_fetch = False
-                elif cached_start <= start_dt and cached_end >= today_dt:
+                # 如果缓存数据覆盖了请求的开始和结束日期，直接返回
+                if cached_start <= start_dt and cached_end >= end_dt:
                     # 缓存数据已经足够，直接返回过滤后的数据
                     df_filtered = df_cached[
                         (df_cached["date"] >= start_dt) & 
@@ -55,6 +50,13 @@ def get_stock_history(symbol: str, start_date: str, end_date: str, adjust: str =
                     ].copy()
                     df_filtered = df_filtered.sort_values("date").reset_index(drop=True)
                     return df_filtered
+                elif cached_start <= start_dt and cached_end < end_dt:
+                    # 缓存数据覆盖了开始日期，但结束日期不足，需要补充获取
+                    # 只获取从缓存最后日期到请求结束日期的数据（不超过今天）
+                    fetch_start_date = (cached_end + pd.Timedelta(days=1)).strftime("%Y%m%d")
+                    # 限制结束日期不超过今天，避免获取未来数据
+                    fetch_end_date = min(end_date, today_dt.strftime("%Y%m%d"))
+                    need_full_fetch = False
         except Exception as e:
             logger.warning(f"读取缓存文件 {cache_file} 失败: {e}")
             df_cached = None

@@ -297,7 +297,7 @@ def load_filter_lists(in_stock):
 
     # 资金条件过滤
     stock_list = stock_list[
-        (stock_list["最新价"] * 100 <= MAX_FUNDS / 3)
+        (stock_list["最新价"] * 100 <= MAX_FUNDS / 2)
         & (stock_list["最新价"] >= 5)
         & (stock_list["成交额"] >= 50_000_000)
     ]
@@ -310,7 +310,7 @@ def load_filter_lists(in_stock):
     stock_list["industry"] = stock_list["code"].map(industries)
     logger.debug(f"行业信息获取完成")
 
-    industry_blacklist = ["国防", "军工", "钢铁","贵金属"]
+    industry_blacklist = ["国防", "军工"]
     stock_list = stock_list[~stock_list["industry"].apply(lambda x: is_industry(x, industry_blacklist))]
 
     stock_list = stock_list.reset_index(drop=True)
@@ -321,9 +321,9 @@ def load_filter_lists(in_stock):
 def get_dynamic_turnover_threshold(free_float_mkt_cap):
     """根据流通市值返回换手率阈值（百分比）"""
     if free_float_mkt_cap <= 50e8:  # 小盘
-        return 0.15
+        return 0.10
     elif free_float_mkt_cap <= 200e8:  # 中盘
-        return 0.08
+        return 0.05
     else:  # 大盘
         return 0.03
 
@@ -416,7 +416,7 @@ def check_stock(code):
 
 """多线程选股"""
 def pick_stocks_multithread(max_workers=20, strategy="a"):
-    logger.info(f"开始多线程选股，线程数: {max_workers}, 策略: {strategy}")
+    logger.info(f"开始多线程选股，线程数: {max_workers}")
     stock_list = load_filter_lists(strategy)
     logger.info(f"待筛选股票数量: {len(stock_list)}")
     
@@ -750,63 +750,8 @@ def save_and_print_picked(
 
     picked.to_csv(normal_path, index=False, encoding="utf-8-sig")
     logger.info(f"已导出文件：{normal_path}")
-    generate_final_stocks()
-    
-
-def generate_final_stocks(output_dir: str = "output", top_n: int = 50, out_file: str = "final_stocks.csv"):
-    """
-    从 `output` 目录下所有 `picked_stocks_YYYYMMDD.csv` 文件中统计股票出现次数，
-    选取出现次数前 `top_n` 的股票（按次数降序），生成 qlib 股票池。
-    """
-    os.makedirs(output_dir, exist_ok=True)
-
-    pattern = os.path.join(output_dir, "picked_stocks_*.csv")
-    files = glob.glob(pattern)
-    if not files:
-        logger.warning(f"未找到任何匹配文件: {pattern}")
-        return None
-
-    # 统计出现次数，并记录每个代码在最新日期的行
-    counts = Counter()
-    latest_record = {}
-
-    for fp in files:
-        # 从文件名中提取日期 例如 picked_stocks_20260123.csv
-        m = re.search(r"(\d{8})", os.path.basename(fp))
-        date_int = int(m.group(1)) if m else 0
-
-        try:
-            df = pd.read_csv(fp, dtype={"代码": str}, encoding="utf-8-sig")
-        except Exception:
-            try:
-                df = pd.read_csv(fp, dtype={"代码": str})
-            except Exception as e:
-                logger.warning(f"读取文件失败 {fp}: {e}")
-                continue
-
-        if df.empty or "代码" not in df.columns:
-            continue
-
-        for _, row in df.iterrows():
-            code = str(row.get("代码", "")).zfill(6)
-            counts[code] += 1
-
-            prev = latest_record.get(code)
-            if (prev is None) or (date_int > prev[0]):
-                latest_record[code] = (date_int, row)
-
-    if not counts:
-        logger.warning("没有统计到任何股票出现次数")
-        return None
-
-    # 取出现次数前 top_n（按次数降序），结果为代码列表
-    top_codes = [code for code, _ in counts.most_common(top_n)]
-
-    if not top_codes:
-        logger.warning("没有找到 top 股票")
-        return None
-    
     # ========= 生成 qlib 股票池 =========
+    top_codes = picked["代码"].dropna().astype(str).tolist()
     instruments = pd.Series(top_codes).map(_to_qlib_instrument)
     qlib_pool_df = pd.DataFrame({"instrument": instruments}).drop_duplicates()
 
@@ -815,8 +760,7 @@ def generate_final_stocks(output_dir: str = "output", top_n: int = 50, out_file:
     qlib_path = os.path.join(QLIB_POOL_DIR, f"{qlib_date}_pool.csv")
     qlib_pool_df.to_csv(qlib_path, index=False, encoding="utf-8")
     logger.info(f"已导出 qlib 股票池：{qlib_path}")
-
-    return qlib_path
+    
 
 if __name__ == "__main__":
     logger.info("=" * 60)
@@ -829,7 +773,7 @@ if __name__ == "__main__":
     init_quote_dict()  # 初始化
 
     logger.info("开始选股流程...")
-    picked = pick_stocks_multithread(max_workers=5, strategy="b")
+    picked = pick_stocks_multithread(max_workers=1, strategy="b")
     
     if not picked.empty:
         logger.info("处理选股结果...")
