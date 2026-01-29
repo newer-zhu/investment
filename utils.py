@@ -3,7 +3,7 @@ import os
 import smtplib
 import configparser
 import datetime
-
+import akshare as ak
 import pandas as pd
 import holidays
 from email.mime.text import MIMEText
@@ -319,3 +319,36 @@ def get_prev_portfolio_avg_message() -> str:
     join_df["涨跌幅"] = _parse_percent_series(join_df["涨跌幅"])  # % → 数值
     avg_rise = join_df["涨跌幅"].mean()
     return f"上一期组合代码数: {len(prev_codes)}；今日平均涨跌幅（%）: {avg_rise:.2f}"
+
+
+def get_prev_trade_date(today_dt: pd.Timestamp) -> pd.Timestamp:
+    """
+    使用 akshare 交易日历，获取上一个交易日
+    """
+    trade_df = ak.tool_trade_date_hist_sina()
+    trade_df["trade_date"] = pd.to_datetime(trade_df["trade_date"])
+
+    trade_dates = trade_df["trade_date"].sort_values().reset_index(drop=True)
+
+    if today_dt not in set(trade_dates):
+        raise ValueError(f"{today_dt.date()} 不在交易日历中")
+
+    idx = trade_dates[trade_dates == today_dt].index[0]
+    if idx == 0:
+        raise ValueError("没有上一个交易日")
+
+    return trade_dates.iloc[idx - 1]
+
+def find_first_missing_trade_date(dates: pd.Series, trade_calendar: pd.Series):
+    """
+    给定已有日期序列，找出第一个缺失的交易日
+    """
+    date_set = set(dates)
+    for d in trade_calendar:
+        if d < dates.min():
+            continue
+        if d > dates.max():
+            break
+        if d not in date_set:
+            return d
+    return None

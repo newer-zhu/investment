@@ -6,7 +6,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import os
 import datetime
 from typing import Dict, Any
-from utils import parse_number, safe_get, is_industry, get_latest_quarter, load_config_from_ini, _to_qlib_instrument
+from utils import parse_number, safe_get, is_industry, get_prev_trade_date, load_config_from_ini, _to_qlib_instrument
 from logger import logger
 from pathlib import Path
 import glob
@@ -134,49 +134,65 @@ def init_quote_dict():
             for col in quote_df.columns
         }
         
-        # 将今日数据追加到对应的历史缓存文件中
-        try:
-            history_cache_dir = os.path.join("cache", "history")
-            os.makedirs(history_cache_dir, exist_ok=True)
-            history_file = os.path.join(history_cache_dir, f"{code}_history.csv")
-            
-            # 构建今日的历史数据行
-            today_data = {
-                "date": today_dt,
-                "股票代码": code,
-                "开盘": parse_number(row.get("今开", 0)),
-                "close": parse_number(row.get("最新价", 0)),
-                "最高": parse_number(row.get("最高", 0)),
-                "最低": parse_number(row.get("最低", 0)),
-                "成交量": parse_number(row.get("成交量", 0)),
-                "成交额": parse_number(row.get("成交额", 0)),
-                "振幅": parse_number(row.get("振幅", 0)),
-                "涨跌幅": parse_number(row.get("涨跌幅", 0)),
-                "涨跌额": parse_number(row.get("涨跌额", 0)),
-                "换手率": parse_number(row.get("换手率", 0)),
-            }
-            
-            # 检查历史文件是否存在
-            if os.path.exists(history_file):
-                # 读取现有数据
-                df_history = pd.read_csv(history_file)
-                df_history["date"] = pd.to_datetime(df_history["date"])
-                
-                # 检查今天是否已经有数据
-                if df_history["date"].max() < today_dt:
-                    # 追加今日数据
-                    df_new = pd.DataFrame([today_data])
-                    df_combined = pd.concat([df_history, df_new], ignore_index=True)
-                    df_combined = df_combined.sort_values("date").reset_index(drop=True)
-                    df_combined.to_csv(history_file, index=False, encoding="utf-8-sig")
-                # 如果今天已有数据，不重复追加
-            else:
-                # 创建新文件
-                df_new = pd.DataFrame([today_data])
-                df_new.to_csv(history_file, index=False, encoding="utf-8-sig")
-        except Exception as e:
-            # 单个股票追加失败不影响整体流程
-            logger.debug(f"追加股票 {code} 今日数据到历史缓存失败: {e}")
+    history_cache_dir = os.path.join("cache", "history")
+    os.makedirs(history_cache_dir, exist_ok=True)
+
+    history_file = os.path.join(history_cache_dir, f"{code}_history.csv")
+
+    # 今日数据
+    today_data = {
+        "date": today_dt,
+        "股票代码": code,
+        "开盘": parse_number(row.get("今开", 0)),
+        "close": parse_number(row.get("最新价", 0)),
+        "最高": parse_number(row.get("最高", 0)),
+        "最低": parse_number(row.get("最低", 0)),
+        "成交量": parse_number(row.get("成交量", 0)),
+        "成交额": parse_number(row.get("成交额", 0)),
+        "振幅": parse_number(row.get("振幅", 0)),
+        "涨跌幅": parse_number(row.get("涨跌幅", 0)),
+        "涨跌额": parse_number(row.get("涨跌额", 0)),
+        "换手率": parse_number(row.get("换手率", 0)),
+    }
+
+    try:
+        prev_trade_dt = get_prev_trade_date(today_dt)
+
+        if os.path.exists(history_file):
+            df_history = pd.read_csv(history_file)
+            df_history["date"] = pd.to_datetime(df_history["date"])
+
+            last_dt = df_history["date"].max().normalize()
+
+            # 已有今日数据 → 直接跳过
+            if last_dt == today_dt:
+                logger.debug(f"{code} 今日已存在，跳过")
+                return
+
+            # 严格连续校验
+            if last_dt != prev_trade_dt:
+                logger.warning(
+                    f"{code} 历史不连续，拒绝追加 | "
+                    f"last={last_dt.date()}, expected={prev_trade_dt.date()}"
+                )
+                return
+
+            # 追加
+            df_new = pd.DataFrame([today_data])
+            df_all = pd.concat([df_history, df_new], ignore_index=True)
+            df_all = df_all.sort_values("date").reset_index(drop=True)
+            df_all.to_csv(history_file, index=False, encoding="utf-8-sig")
+
+            logger.info(f"{code} 成功追加 {today_dt.date()}")
+
+        else:
+            # 首次建文件（不做连续性校验）
+            df_new = pd.DataFrame([today_data])
+            df_new.to_csv(history_file, index=False, encoding="utf-8-sig")
+            logger.info(f"{code} 初始化历史文件")
+
+    except Exception as e:
+        logger.debug(f"{code} 追加失败: {e}")
     
     logger.info(f"行情数据加载完成，共 {len(QUOTE_DICT)} 只股票，今日数据已同步到历史缓存")
         
@@ -259,15 +275,6 @@ def load_filter_lists(in_stock):
     # 向上突破A股
     stock_list = load_up_trend_stocks()
 
-    # ST 股
-    logger.debug("加载ST股列表...")
-    try:
-        st_codes = set(ak.stock_zh_a_st_em()['代码'].astype(str))
-        logger.debug(f"加载ST股完成，共 {len(st_codes)} 只")
-    except Exception as e:
-        logger.warning(f"加载ST股失败: {e}")
-        st_codes = set()
-
     # 停牌股
     logger.debug("加载停牌股列表...")
     try:
@@ -283,8 +290,7 @@ def load_filter_lists(in_stock):
 
     # 黑名单集合
     excluded_codes = (
-        st_codes
-        | suspension_codes
+        suspension_codes
         | set(map(str, HALF_YEAR_HIGH_SET))
         | set(map(str, ljqd_blacklist))
     )
