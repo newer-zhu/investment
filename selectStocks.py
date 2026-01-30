@@ -6,13 +6,13 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import os
 import datetime
 from typing import Dict, Any
-from utils import parse_number, safe_get, is_industry, get_prev_trade_date, load_config_from_ini, _to_qlib_instrument
+from utils import parse_number, throttle, safe_get, is_industry, get_prev_trade_date, load_config_from_ini, _to_qlib_instrument
 from logger import logger
 from pathlib import Path
 import glob
 import re
 from collections import Counter, defaultdict
-
+import random
 
 
 # 全局资金上限（单位：元）
@@ -558,7 +558,7 @@ def get_fundamental_data(code: str) -> Dict[str, Any]:
     # 使用股票代码作为文件名前缀
     cache_file = os.path.join(financial_cache_dir, f"{code}_financial.csv")
     
-    # 检查缓存文件是否存在且是否需要刷新（每月刷新一次）
+    # 检查缓存文件是否存在且是否需要刷新
     need_refresh = False
     df = None
     
@@ -568,11 +568,14 @@ def get_fundamental_data(code: str) -> Dict[str, Any]:
             file_mtime = os.path.getmtime(cache_file)
             file_time = datetime.datetime.fromtimestamp(file_mtime)
             time_diff = datetime.datetime.now() - file_time
+            EXPIRE_DAYS = 80
+            JITTER_DAYS = 15  # 随机抖动
+            expire_days = EXPIRE_DAYS + random.randint(0, JITTER_DAYS)
             
-            # 如果缓存超过30天，需要刷新
-            if time_diff.days > 30:
+            # 如果缓存超过60天，需要刷新
+            if time_diff.days > expire_days:
                 need_refresh = True
-                logger.info(f"{code} 财务缓存已超过30天，刷新数据...")
+                logger.info(f"{code} 财务缓存已超过60天，刷新数据...")
             else:
                 # 缓存仍然有效，加载缓存数据
                 df = pd.read_csv(cache_file)
@@ -582,13 +585,14 @@ def get_fundamental_data(code: str) -> Dict[str, Any]:
         except Exception as e:
             logger.warning(f"读取财务缓存文件 {cache_file} 失败: {e}")
             df = None
-            need_refresh = True
+            need_refresh = False
     else:
         need_refresh = True
     
     # 如果缓存不存在或需要刷新，从API获取
     if need_refresh:
         try:
+            throttle()
             df = ak.stock_financial_abstract_ths(symbol=code)
             if df.empty:
                 return {}
@@ -726,8 +730,6 @@ def calculate_fundamental_score(code: str, industry: str) -> float:
             score *= 0.6
 
     return float(min(100.0, max(0.0, score)))
-
-
 
 
 def save_and_print_picked(

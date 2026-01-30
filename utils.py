@@ -10,11 +10,21 @@ from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from email.header import Header
 from logger import logger
-
+import time
 
 OUTPUT_FOLDER = "output"
 FILENAME_PREFIX = "picked_stocks"
+LAST_CALL_TIME = 0
+MIN_INTERVAL = 1.5  # 秒
 
+def throttle():
+    global LAST_CALL_TIME
+    now = time.time()
+    sleep_time = MIN_INTERVAL - (now - LAST_CALL_TIME)
+    if sleep_time > 0:
+        time.sleep(sleep_time)
+    LAST_CALL_TIME = time.time()
+    
 def _to_qlib_instrument(code: str) -> str:
     """
     600000 -> SH600000
