@@ -72,7 +72,7 @@ for ts_code in tqdm(ts_codes):
         out_file = OUT_DIR / f"{ts_code}.csv"
         df.to_csv(out_file, index=False)
 
-        time.sleep(0.2)  # 控频
+        time.sleep(0.1)  # 控频
 
     except Exception as e:
         print(f"[ERROR] {ts_code}: {e}")
