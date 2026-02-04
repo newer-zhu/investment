@@ -1,128 +1,69 @@
+import sys
 from pathlib import Path
 from datetime import datetime
-from dateutil.relativedelta import relativedelta
-from utils.filter_stocks import get_industry_from_cache
-import sys
 import qlib
 from qlib.data import D
 import pandas as pd
-from datetime import datetime, timedelta
+from dateutil.relativedelta import relativedelta
+from constants import DATA_PATH, FINANCE_PATH
+# 导入你的行业工具
+from utils.filter_stocks import get_industry_from_cache
+from typing import List
+from utils.logger import logger
+# ================= 路径配置 =================
 
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
-QLIB_PATH = PROJECT_ROOT / "data" / "source"
-DATA_PATH = QLIB_PATH / "instruments" / "all.txt"
-OUTPUT_PATH= QLIB_PATH / "instruments" / "my_filtered_pool.txt"
-
-current_dir = Path(__file__).resolve().parent
-if str(current_dir) not in sys.path:
-    sys.path.append(str(current_dir))
-
-def load_recent_instruments(
-    universe_file: Path,
-    recent_months: int = 1,
-):
-    """
-    读取 universe 文件
-    条件：end_date 在 [today - recent_months, today] 之间
-    """
-    today = datetime.today().date()
-    start_date = today - relativedelta(months=recent_months)
-
-    codes = []
-
-    with open(universe_file, "r", encoding="utf-8") as f:
-        for line in f:
-            if not line.strip():
-                continue
-
-            code, _, end_date = line.strip().split()
-
-            end_dt = datetime.strptime(end_date, "%Y-%m-%d").date()
-
-            if start_date <= end_dt <= today:
-                codes.append(code)
-
-    return codes
+OUTPUT_PATH = DATA_PATH / "instruments" / "my_filtered_pool.txt"
 
 def filter_mainboard_stocks(codes):
     """
-    过滤掉：
-    - 创业板 (300 / 301)
-    - 科创板 (688 / 689)
-    - 新三板 (8xxxx)
-    - 京交所 (BJ)
+    过滤逻辑：
+    - 排除指数
+    - 排除京交所
+    - 排除创业板 / 科创板 / 新三板
+    - 只保留主板个股
     """
     filtered = []
 
     for code in codes:
-        code_upper = code.upper()
+        c = code.strip().upper()
 
-        # 京交所（直接排）
-        if code_upper.startswith("BJ"):
+        # ---- 1. 只接受 SH / SZ 开头 ----
+        if not (c.startswith("SH") or c.startswith("SZ")):
             continue
 
-        # 提取 6 位纯数字
-        pure = "".join(filter(str.isdigit, code_upper)).zfill(6)
-
-        # 创业板 / 科创板 / 新三板
-        if pure.startswith(("300", "301", "688", "689", "8")):
+        # ---- 2. 提取 6 位数字 ----
+        digits = "".join(filter(str.isdigit, c))
+        if len(digits) != 6:
             continue
 
-        filtered.append(code)
+        # ---- 3. 排除指数（关键）----
+        # 上证指数：000xxx
+        # 深证指数：399xxx
+        if digits.startswith(("000", "399")):
+            continue
+
+        # ---- 4. 排除板块 ----
+        if c.startswith("BJ"):
+            continue
+        if digits.startswith(("300", "301", "688", "689", "8")):
+            continue
+
+        filtered.append(c)
 
     return filtered
 
-def filter_by_price(
-    codes,
-    lookback_days=5,
-    min_close_price=3.0,
-):
-    # 1. 安全获取日期：取数据库里存在的最新交易日
-    all_calendar = D.calendar()
-    last_trade_day = all_calendar[-1] 
-    # 往前推 lookback_days 个交易日
-    start_trade_day = all_calendar[-max(len(all_calendar), lookback_days)]
-
-    fields = [
-        "$close", 
-        "$close / $factor", 
-    ]
-    
-    # 2. 获取数据
-    df = D.features(
-        instruments=codes,
-        fields=fields,
-        start_time=start_trade_day,
-        end_time=last_trade_day,
-    )
-
-    if df.empty:
-        return df
-
-    # 3. 稳妥地修改列名 (通过 rename 而不是直接覆盖)
-    # Qlib 返回的列名通常是 fields 里的原字符串
-    df.columns = ["close", "raw_close"]
-
-    # 4. 过滤：我们通常只看“最新”一天的价格是否低于阈值
-    # 如果只看最后一天：
-    last_day_df = df.groupby('instrument').last()
-    filtered_df = last_day_df[last_day_df['raw_close'] > min_close_price]
-
-    return filtered_df
-
-def filter_by_industry(codes, banned_industries=("军工",)):
+def filter_by_industry(codes, banned_industries=("军工", "国防")):
     """
     根据行业关键字过滤股票
-    依赖外部:
-        get_industry_from_cache(code) -> str | None
     """
     filtered = []
-
     for code in codes:
+        # 统一处理代码格式，提取纯数字部分用于查询缓存
+        pure_code = "".join(filter(str.isdigit, code))
         try:
-            industry = get_industry_from_cache(code[2:])
+            industry = get_industry_from_cache(pure_code)
         except Exception:
-            # 缓存异常 / 查不到，直接跳过或保留，看你策略
+            # 缓存异常则跳过该股
             continue
 
         if not industry:
@@ -133,61 +74,181 @@ def filter_by_industry(codes, banned_industries=("军工",)):
             continue
 
         filtered.append(code)
-
     return filtered
 
-def main():
-    qlib.init(provider_uri=QLIB_PATH)
-    universe_file = Path(DATA_PATH)
-
-    codes = load_recent_instruments(
-        universe_file=universe_file,
-        recent_months=1,
-    )
-    codes = filter_mainboard_stocks(codes)
-    # codes = filter_by_industry(
-    #     codes,
-    #     banned_industries=("军工","国防"))
-    codes = filter_by_price(
-        codes,
-        lookback_days=1,
-        min_close_price=5.0,
-    )
-
-    # 1. 从 Qlib 获取所有股票的原始日期配置
-    # D.instruments('all') 返回的是 dict: {code: [[start_date, end_date], ...]}
-    all_insts = D.instruments(market='all').list_instruments()
-    
-    # 2. 提取过滤后的代码
-    filtered_codes = codes.index.unique().tolist()
-    
-    final_data = []
-    
-    for code in filtered_codes:
-        if code in all_insts:
-            # 获取该代码在 all.txt 中的日期范围
-            # 注意：有些票可能有多段日期，通常取第一段即可 [0]
-            start_dt, end_dt = all_insts[code][0]
+def filter_by_price(codes, min_price=5.0, min_amount_avg=30_000):
+    """
+    双重过滤：
+    1. 价格过滤：剔除低价股（面值退市风险）
+    2. 成交额过滤：剔除僵尸股，保留流动性好的精华股
+    """
+    # 修正点 1：使用 len() 判断列表或数组是否为空
+    if codes is None or len(codes) == 0: 
+        return []
+        
+    try:
+        all_cal = qlib.data.D.calendar()
+        # 修正点 2：Numpy 数组不能直接用 'if not'，需检查长度
+        if len(all_cal) == 0: 
+            return codes
             
-            # 转换为字符串格式 YYYY-MM-DD
-            start_str = start_dt.strftime('%Y-%m-%d')
-            end_str = end_dt.strftime('%Y-%m-%d')
-            
-            final_data.append([code, start_str, end_str])
+        last_day = all_cal[-1]
+        
+        # 批量获取：价格还原因子与 5日均成交额
+        fields = ["$close / $factor", "Mean($amount, 5)"]
+        df = qlib.data.D.features(codes, fields, start_time=last_day, end_time=last_day)
+        
+        # 修正点 3：Pandas DataFrame 必须使用 .empty 判断
+        if df is None or df.empty: 
+            return codes
+        
+        # 重命名列名以便操作
+        df.columns = ["raw_price", "avg_amount_5d"]
+        
+        # 逻辑判断：使用位运算符 & (注意每个条件都要加括号)
+        mask = (df["raw_price"] > min_price) & (df["avg_amount_5d"] > min_amount_avg)
+        
+        filtered_codes = df[mask].index.get_level_values('instrument').unique().tolist()
+        
+        print(f"📊 过滤报告: 原始 {len(codes)} -> 剩余 {len(filtered_codes)} (剔除 {len(codes)-len(filtered_codes)} 只)")
+        return filtered_codes
+        
+    except Exception as e:
+        print(f"❌ 筛选异常: {e}")
+        return codes
+
+def filter_stocks_by_finance(
+    codes: List[str],
+    start_time: str,
+    end_time: str,
+    roe_min: float = 10.0,
+    gross_margin_min: float = 20.0,
+    or_yoy_min: float = 0.0,
+    debt_to_assets_max: float = 70.0,
+    current_ratio_min: float = 1.0,
+    min_valid_metrics: int = 3,   # 至少有几个指标非空
+    min_pass_metrics: int = 3,    # 至少满足几个条件
+) -> List[str]:
+    """
+    使用财务指标对股票做初步过滤（宽松版，防未来函数）
+    """
+    logger.info(f"开始财务初筛，股票数: {len(codes)}")
+
+    qlib.init(provider_uri=str(FINANCE_PATH))
+
+    fields = [
+        "$roe",
+        "$gross_margin",
+        "$or_yoy",
+        "$debt_to_assets",
+        "$current_ratio",
+    ]
+
+    df = D.features(
+        instruments=codes,
+        fields=fields,
+        start_time=start_time,
+        end_time=end_time,
+    )
+
+    df.columns = [
+        "roe",
+        "gross_margin",
+        "or_yoy",
+        "debt_to_assets",
+        "current_ratio",
+    ]
+
+    passed_codes = []
+    no_data_cnt = 0
+    filtered_cnt = 0
+
+    for code, df_code in df.groupby(level="instrument"):
+        df_code = df_code.droplevel("instrument")
+
+        df_valid = df_code.dropna(how="all")
+        if df_valid.empty:
+            no_data_cnt += 1
+            continue
+
+        latest = df_valid.iloc[-1]
+
+        conditions = {
+            "roe": latest["roe"] >= roe_min if not pd.isna(latest["roe"]) else None,
+            "gross_margin": latest["gross_margin"] >= gross_margin_min if not pd.isna(latest["gross_margin"]) else None,
+            "or_yoy": latest["or_yoy"] >= or_yoy_min if not pd.isna(latest["or_yoy"]) else None,
+            "debt_to_assets": latest["debt_to_assets"] <= debt_to_assets_max if not pd.isna(latest["debt_to_assets"]) else None,
+            "current_ratio": latest["current_ratio"] >= current_ratio_min if not pd.isna(latest["current_ratio"]) else None,
+        }
+
+        valid_metrics = [v for v in conditions.values() if v is not None]
+        pass_metrics = [v for v in valid_metrics if v]
+
+        if len(valid_metrics) < min_valid_metrics:
+            filtered_cnt += 1
+            continue
+
+        if len(pass_metrics) >= min_pass_metrics:
+            passed_codes.append(code)
         else:
-            # 万一在 all 里面没找到（理论上不会），给个默认值
-            final_data.append([code, '2020-01-01', '2099-12-31'])
+            filtered_cnt += 1
 
-    # 3. 转换为 DataFrame 并保存为 Qlib 标准的 Tab 分隔格式
-    res_df = pd.DataFrame(final_data)
-    res_df.to_csv(
-        OUTPUT_PATH, 
-        sep='\t', 
-        header=False, 
-        index=False
+    logger.info(
+        f"财务筛选完成 | 总数: {len(codes)} | "
+        f"无数据: {no_data_cnt} | "
+        f"被筛掉: {filtered_cnt} | "
+        f"通过: {len(passed_codes)}"
     )
-    print(f"已按原始日期范围保存至: {OUTPUT_PATH}")
 
+    return passed_codes
+def main():
+    # 1. 初始化 Qlib
+    qlib.init(provider_uri=str(DATA_PATH))
+    
+    # 2. 获取初始候选池 (使用 D 工具方法)
+    today = datetime.today()
+    start_dt = (today - relativedelta(months=1)).strftime('%Y-%m-%d')
+    end_dt = today.strftime('%Y-%m-%d')
+
+    print(f"正在从 Qlib 提取 {start_dt} 至今活跃的股票...")
+    inst_obj = D.instruments(market='all')
+    codes = D.list_instruments(instruments=inst_obj, start_time=start_dt, end_time=end_dt, as_list=True)
+    print(f"初始代码数量: {len(codes)}")
+    
+    # 3. 执行多重过滤
+    # (1) 板块过滤
+    codes = filter_mainboard_stocks(codes)
+    print(f"主板过滤后数量: {len(codes)}")
+    
+        # (3) 价格过滤
+    codes = filter_by_price(codes, min_price=5.0)
+    print(f"价格过滤后数量: {len(codes)}")
+    
+    # (4) 财务指标过滤
+    codes = filter_stocks_by_finance(
+        codes,
+        start_time=(today - relativedelta(years=1)).strftime('%Y-%m-%d'),
+        end_time=end_dt,
+        roe_min=5.0,
+        or_yoy_min=0.0,
+        debt_to_assets_max=70.0
+    )
+    
+    # (2) 行业过滤
+    # codes = filter_by_industry(codes, banned_industries=("军工", "国防","银行"))
+    # print(f"行业过滤后数量: {len(codes)}")
+    
+
+
+    # 4. 保存为单列 TXT
+    if codes:
+        OUTPUT_PATH.parent.mkdir(parents=True, exist_ok=True)
+        with open(OUTPUT_PATH, "w", encoding="utf-8") as f:
+            for code in codes:
+                f.write(f"{code}\n")
+        print(f"筛选完成，{len(codes)} 只股票已保存至: {OUTPUT_PATH}")
+    else:
+        print("最终结果为空，未生成文件。")
 
 if __name__ == "__main__":
     main()

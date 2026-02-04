@@ -1,3 +1,4 @@
+from time import sleep
 import akshare as ak
 import pandas as pd
 from utils.api import get_stock_history
@@ -6,7 +7,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import os
 import datetime
 from typing import Dict, Any
-from utils.utils import parse_number, throttle, safe_get, is_industry, get_prev_trade_date, load_config_from_ini, _to_qlib_instrument
+from utils.util import parse_number, throttle, safe_get, is_industry, get_prev_trade_date, load_config_from_ini, _to_qlib_instrument
 from utils.logger import logger
 from pathlib import Path
 import glob
@@ -20,13 +21,13 @@ import sys
 # ================== 0. 配置区 ==================
 PROJECT_ROOT = Path(__file__).resolve().parents[3]  # 视你的层级而定
 
-DATA_DIR = PROJECT_ROOT / "data"
+DATA_DIR = PROJECT_ROOT / "data" 
 
 # 全局资金上限（单位：元）
 MAX_FUNDS = float(load_config_from_ini("strategy").get("max_funds", 20000))
 # 股票行业信息
-# 代码,名称,最新价,涨跌幅,涨跌额,成交量,成交额,振幅,最高,最低,今开,昨收,量比,换手率,市盈率-动态,市净率,总市值,流通市值,涨速,5分钟涨跌,60日涨跌幅,年初至今涨跌幅
 INFO_CACHE = {}  
+_CACHE_LOADED = False
 # 资金流和换手率缓存
 # 股票代码	int64	-
 # 最新价	float64	-
@@ -212,63 +213,60 @@ QLIB_POOL_DIR = PROJECT_ROOT / "investment" / "investment-qlib" / "data" / "stoc
 #     logger.info("所有初始化完成")
     
 
-"""获取股票行业信息，带CSV缓存"""
 def get_industry_from_cache(code):
-    # 首次调用时，从CSV加载缓存
-    if not INFO_CACHE:
-        industry_cache_dir = DATA_DIR / "cache" / "industry"
-        os.makedirs(industry_cache_dir, exist_ok=True)
-        cache_file = os.path.join(industry_cache_dir, "stock_industry_cache.csv")
-        
-        if os.path.exists(cache_file):
+    """获取股票行业信息，带 CSV 缓存"""
+    global _CACHE_LOADED
+
+    industry_cache_dir = DATA_DIR / "cache" / "industry"
+    os.makedirs(industry_cache_dir, exist_ok=True)
+    cache_file = industry_cache_dir / "stock_industry_cache.csv"
+
+    # ---------- 1. 只加载一次 CSV ----------
+    if not _CACHE_LOADED:
+        if cache_file.exists():
             try:
                 df_cache = pd.read_csv(cache_file, dtype={"code": str})
                 for _, row in df_cache.iterrows():
-                    INFO_CACHE[row["code"]] = row["industry"] if pd.notna(row["industry"]) else None
+                    INFO_CACHE[row["code"]] = (
+                        row["industry"] if pd.notna(row["industry"]) else None
+                    )
             except Exception as e:
                 logger.warning(f"加载行业缓存失败: {e}")
-    
-    # 检查内存缓存
-    if code in INFO_CACHE:
+        _CACHE_LOADED = True
+
+    # ---------- 2. 命中缓存 ----------
+    if code in INFO_CACHE and INFO_CACHE[code] is not None:
         return INFO_CACHE[code]
 
-    # 如果不在缓存中，调用API获取
+    # ---------- 3. 请求 API ----------
     try:
         df_info = ak.stock_individual_info_em(symbol=code)
-        industry_row = df_info[df_info["item"] == "行业"]
-        if not industry_row.empty:
-            industry = industry_row["value"].iloc[0]
-        else:
-            industry = None
+        sleep(1)  # 避免请求过快被封禁
+        row = df_info[df_info["item"] == "行业"]
+        industry = row["value"].iloc[0] if not row.empty else None
     except Exception as e:
         logger.warning(f"获取 {code} 行业信息失败: {e}")
         return None
 
-    # 更新内存缓存
+    # ---------- 4. 更新内存 ----------
     INFO_CACHE[code] = industry
-    
-    # 保存到CSV
-    industry_cache_dir =  DATA_DIR / "cache" / "industry"
-    os.makedirs(industry_cache_dir, exist_ok=True)
-    cache_file = os.path.join(industry_cache_dir, "stock_industry_cache.csv")
-    
+
+    # ---------- 5. 追加写 CSV（而不是全量覆盖） ----------
     try:
-        # 读取现有数据或创建新的DataFrame
-        if os.path.exists(cache_file):
+        if cache_file.exists():
             df_cache = pd.read_csv(cache_file, dtype={"code": str})
-            # 如果code已存在，更新；否则追加
-            if code in df_cache["code"].values:
-                df_cache.loc[df_cache["code"] == code, "industry"] = industry
-            else:
-                df_cache = pd.concat([df_cache, pd.DataFrame({"code": [code], "industry": [industry]})], ignore_index=True)
+            if code not in df_cache["code"].values:
+                df_cache = pd.concat(
+                    [df_cache, pd.DataFrame({"code": [code], "industry": [industry]})],
+                    ignore_index=True,
+                )
         else:
             df_cache = pd.DataFrame({"code": [code], "industry": [industry]})
-        
-        # 保存到CSV
+
         df_cache.to_csv(cache_file, index=False, encoding="utf-8-sig")
     except Exception as e:
         logger.warning(f"保存行业缓存失败: {e}")
-    
+
     return industry
 
 # # 突破上涨的股票

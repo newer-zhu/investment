@@ -3,7 +3,7 @@ import pandas as pd
 import os
 import datetime
 from utils.logger import logger
-from utils.utils import get_prev_trade_date, find_first_missing_trade_date
+from utils.util import get_prev_trade_date, find_first_missing_trade_date
 
 
 
