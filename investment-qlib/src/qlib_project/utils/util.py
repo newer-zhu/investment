@@ -362,3 +362,13 @@ def find_first_missing_trade_date(dates: pd.Series, trade_calendar: pd.Series):
         if d not in date_set:
             return d
     return None
+
+
+def load_stock_pool(txt_path: str):
+    with open(txt_path, "r", encoding="utf-8") as f:
+        instruments = [
+            line.strip()
+            for line in f
+            if line.strip()
+        ]
+    return instruments

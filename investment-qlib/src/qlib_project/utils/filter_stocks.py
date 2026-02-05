@@ -302,17 +302,6 @@ def get_industry_from_cache(code):
 #         & (stock_list["成交额"] >= 50_000_000)
 #     ]
 
-#     # === 行业过滤：一次性批量获取行业信息 ===
-#     logger.info(f"开始批量获取行业信息，共 {len(stock_list)} 只股票...")
-#     industries = {}
-#     for code in tqdm(stock_list['code'], desc="获取行业信息", leave=False):
-#         industries[code] = get_industry_from_cache(code)
-#     stock_list["industry"] = stock_list["code"].map(industries)
-#     logger.debug(f"行业信息获取完成")
-
-#     industry_blacklist = ["国防", "军工"]
-#     stock_list = stock_list[~stock_list["industry"].apply(lambda x: is_industry(x, industry_blacklist))]
-
 #     stock_list = stock_list.reset_index(drop=True)
 #     logger.info(f"筛选完成，剩余 {len(stock_list)} 只股票")
 #     return stock_list[["code"]]

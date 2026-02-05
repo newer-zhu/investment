@@ -1,51 +1,54 @@
 def get_model_params(hold_days: int):
     """
-    核心调参逻辑：
-    1. 预测周期越长（hold_days 越大），市场噪音增益越高，因此：
-       - 降低学习率 (learning_rate)，防止模型过快拟合随机噪音。
-       - 增强正则化 (lambda_l1/l2)，强制模型保持简洁。
-       - 减小树深度 (max_depth)，由“深而精”转向“浅而稳”。
-    2. 引入动态随机采样：
-       - 随持仓天数增加，降低特征采样比例，增加特征间的竞争。
-       - 增加叶子节点最少样本数，确保长线信号具有统计意义。
+    改造目标：
+    - 强制抑制过拟合（解决 best iteration = 1）
+    - 保留你「周期越长越稳」的设计思想
     """
-    # 基础通用参数
+
+    # 基础参数（收紧）
     params = {
         "objective": "regression",
-        "loss": "mse",
-        "num_leaves": 31,
+        "metric": "l2",
+        "num_leaves": 16,          # 🔴 关键：直接砍半
         "n_jobs": -1,
         "verbosity": -1,
+        "early_stopping_rounds": 50,
     }
-    
-    # 周期性硬配置表
-    # key: hold_days -> values: [n_estimators, lr, l1, l2, depth]
+
+    # 周期配置（整体变“保守”）
+    # 注意：短周期不再更激进
     configs = {
-        1: {"n_estimators": 500, "lr": 0.010, "l1": 0.05, "l2": 0.05, "depth": 6},
-        2: {"n_estimators": 550, "lr": 0.008, "l1": 0.10, "l2": 0.10, "depth": 6},
-        3: {"n_estimators": 600, "lr": 0.005, "l1": 0.15, "l2": 0.15, "depth": 5},
-        4: {"n_estimators": 650, "lr": 0.005, "l1": 0.20, "l2": 0.20, "depth": 5},
-        5: {"n_estimators": 700, "lr": 0.003, "l1": 0.25, "l2": 0.25, "depth": 4},
+        1: {"n_estimators": 800,  "lr": 0.03,  "l1": 0.05, "l2": 0.05, "depth": 4},
+        2: {
+            "n_estimators": 1000, 
+            "lr": 0.02,           # 从 0.01 提升到 0.02
+            "l1": 0.5,            # 稍微降低正则化，让更多特征参与
+            "l2": 0.5, 
+            "depth": 3,           # 从 2 层提升到 3 层，允许模型理解简单的特征组合
+        },
+        3: {"n_estimators": 1200, "lr": 0.02,  "l1": 0.10, "l2": 0.10, "depth": 4},
+        4: {"n_estimators": 1400, "lr": 0.015, "l1": 0.15, "l2": 0.15, "depth": 3},
+        5: {"n_estimators": 1600, "lr": 0.01,  "l1": 0.20, "l2": 0.20, "depth": 3},
     }
-    
-    # 获取对应配置，若超出 1-5 范围则默认取 3 日配置
+
     c = configs.get(hold_days, configs[3])
-    
-    # 动态公式计算部分
-    # 核心：feature_fraction 随周期增加线性下降，min_data_in_leaf 随周期线性上升
-    dynamic_feature_fraction = max(0.6, 0.8 - (hold_days * 0.03))
-    dynamic_min_data = 30 + (hold_days * 15)
-    
+
+    # 动态部分（幅度拉大，真正起作用）
+    feature_fraction = max(0.5, 0.75 - hold_days * 0.05)
+    min_data_in_leaf = 80 + hold_days * 40   # 🔴 关键：数量级变化
+
     params.update({
         "n_estimators": c["n_estimators"],
         "learning_rate": c["lr"],
         "max_depth": c["depth"],
         "lambda_l1": c["l1"],
         "lambda_l2": c["l2"],
-        "feature_fraction": dynamic_feature_fraction,
-        "bagging_fraction": dynamic_feature_fraction,
         "bagging_freq": 5,
-        "min_data_in_leaf": dynamic_min_data,
+        "num_leaves": 8,           # 限制叶子数，比 depth 更有效地控制复杂度
+        "min_data_in_leaf": 30,     # 强制降低！CSI300 样本少，必须降到 5-10
+        "feature_fraction": 0.6,   # 允许模型看所有特征
+        "bagging_fraction": 0.7,
+        "early_stopping_rounds": 100, # 即使验证集不动，也多给它 100 轮机会
     })
-    
+
     return params
