@@ -7,20 +7,34 @@ from qlib.data.dataset import DatasetH
 from qlib.contrib.data.handler import Alpha158
 from qlib.contrib.model.gbdt import LGBModel
 from utils.model_params_adjust import get_model_params
+from constants import DATA_PATH
+# from qlib.contrib.data.processor import CSScale, DropnaLabel
 # ================== 1. 动态 Handler 工厂 ==================
 def get_dynamic_handler(hold_days: int):
-    """
-    根据持有天数动态生成 Alpha158 处理器
-    """
-    # 计算公式：(未来第N天的收盘价 / 明天的开盘价) - 1 
-    # Qlib 中 Ref(close, -2) 通常指 T+1 的价格
     target_ref = -(hold_days + 1)
     label_expr = f"Ref($close, {target_ref}) / Ref($close, -1) - 1"
     
     class DynamicAlpha158(Alpha158):
         def get_label_config(self):
+            # 必须叫 LABEL0 才能匹配你源码里的正则 ^LABEL
             return ([label_expr], ["LABEL0"])
+        
+        def get_learn_processors(self):
+            """
+            直接在子类定义中硬编码处理器配置，彻底解决 TypeError
+            """
+            # 这里对应你贴出的源码类名
+            return [
+                {
+                    "class": "ConfigSectionProcessor",
+                    "kwargs": {
+                        "fillna_label": True,
+                        "clip_label_outlier": True,
+                    },
+                }
+            ]
             
+    # 这次直接返回类名，不再用那个 factory 包装，减少出错可能
     return DynamicAlpha158
 
 # ================== 2. 动态调参映射表 ==================
@@ -30,15 +44,14 @@ def run_dynamic_predict(
     pool_date: str,
     hold_days: int = 3,
     topk: int = 10,
-    start_date: str = "2024-04-01", # 建议训练集拉长，增加泛化性
-    test_start: str = "2025-04-01"
+    start_date: str = "2010-01-01", # 建议训练集拉长，增加泛化性
+    test_start: str = "2025-10-01"
 ):
     # 环境初始化
     os.environ["PYTHONIOENCODING"] = "utf-8"
     
     # --- 路径修正：直接指向你的 source 目录 ---
     PROJECT_ROOT = Path(__file__).resolve().parents[2]
-    DATA_PATH = PROJECT_ROOT /  "data" / "source" 
     RESULT_DIR = PROJECT_ROOT / "data" / "pool_predictions_lgb"
     
     # 初始化 Qlib
@@ -57,12 +70,16 @@ def run_dynamic_predict(
         end_time=pool_date,
     )
 
+    valid_start = pd.Timestamp(test_start) - pd.Timedelta(days=90) 
+    valid_start_str = valid_start.strftime('%Y-%m-%d')
+    
     # ---------- 2. 构建数据集 ----------
     dataset = DatasetH(
         handler=handler,
         segments={
-            "train": (start_date, test_start), 
-            "test": (test_start, pool_date)
+            "train": (start_date, valid_start_str),      # 真正的训练集
+            "valid": (valid_start_str, test_start),       # 验证集：用于早停监控
+            "test": (test_start, pool_date)               # 测试集
         },
     )
 
@@ -103,7 +120,7 @@ def run_dynamic_predict(
 
 if __name__ == "__main__":
     run_dynamic_predict(
-        pool_date="2026-02-03", 
-        hold_days=3,
+        pool_date="2026-02-04", 
+        hold_days=2,
         topk=10
     )

@@ -3,35 +3,56 @@ from pathlib import Path
 import pandas as pd
 from tqdm import tqdm
 import tushare as ts
+
 # ======================
 # 1. TuShare 初始化
 # ======================
 token = "2f80f707c09dc4ce6c59eb215739349f7a203485b19b4401a683bb6549ec"
 
 pro = ts.pro_api(token)
+pro._DataApi__token = token
+pro._DataApi__http_url = 'http://lianghua.9vvn.com'
 
-pro._DataApi__token = token # 保证有这个代码，不然不可以获取
-pro._DataApi__http_url = 'http://lianghua.9vvn.com'  # 保证有这个代码，不然不可以获取
+# ======================
+# 2. 路径配置
+# ======================
+POOL_FILE = Path("/mnt/f/Code/investment/investment-qlib/data/source/instruments/my_filtered_pool.txt")
 
-
-
-# ========== 输出目录 ==========
-OUT_DIR = Path("/mnt/f/Code/investment/investment-qlib/data/fundamental/fina_indicator")
+OUT_DIR = Path(
+    "/mnt/f/Code/investment/investment-qlib/data/fundamental/fina_indicator"
+)
 OUT_DIR.mkdir(parents=True, exist_ok=True)
 
-# ========== 核心字段 ==========
+# ======================
+# 3. 核心字段
+# ======================
 CORE_COLS = [
     "ts_code",
     "ann_date",
     "end_date",
-    "net_profit",          # 净利润
-    "roe",                 # 净资产收益率
-    "gross_margin",        # 销售毛利率
-    "net_profit_yoy",      # 净利润同比
-    "or_yoy",              # 营业收入同比
-    "debt_to_assets",      # 资产负债率
-    "current_ratio",       # 流动比率
+    "roe",
+    "grossprofit_margin",
+    "or_yoy",
+    "debt_to_assets",
+    "current_ratio",
+    "netprofit_margin"
 ]
+
+# ======================
+# 4. 工具函数
+# ======================
+def qlib_to_tushare(code: str) -> str:
+    """
+    SH600000 -> 600000.SH
+    SZ000001 -> 000001.SZ
+    """
+    code = code.strip().upper()
+    if code.startswith("SH"):
+        return code[2:] + ".SH"
+    if code.startswith("SZ"):
+        return code[2:] + ".SZ"
+    raise ValueError(f"Unknown code format: {code}")
+
 
 def download_one(ts_code: str) -> pd.DataFrame | None:
     """
@@ -42,36 +63,38 @@ def download_one(ts_code: str) -> pd.DataFrame | None:
     if df is None or df.empty:
         return None
 
-    # 排序（非常重要，后面 dump / 回测都依赖这个）
-    df = df.sort_values(["end_date", "ann_date"])
+    df = df.sort_values(["ann_date"])
 
-    # 只保留存在的核心列
     keep_cols = [c for c in CORE_COLS if c in df.columns]
-    df = df[keep_cols]
-
-    return df
+    return df[keep_cols]
 
 
-# ========== 股票列表 ==========
-stock_basic = pro.stock_basic(
-    exchange="",
-    list_status="L",
-    fields="ts_code"
-)
-ts_codes = stock_basic["ts_code"].tolist()
+# ======================
+# 5. 读取自定义股票池
+# ======================
+with open(POOL_FILE, "r") as f:
+    qlib_codes = [line.strip() for line in f if line.strip()]
 
-print(f"Total stocks: {len(ts_codes)}")
+ts_codes = [qlib_to_tushare(c) for c in qlib_codes]
 
-# ========== 主循环 ==========
+print(f"Total stocks from pool: {len(ts_codes)}")
+
+# ======================
+# 6. 主循环（带文件存在判断）
+# ======================
 for ts_code in tqdm(ts_codes):
     try:
+        out_file = OUT_DIR / f"{ts_code}.csv"
+
+        # ---- 已存在则跳过 ----
+        if out_file.exists():
+            continue
+
         df = download_one(ts_code)
         if df is None:
             continue
 
-        out_file = OUT_DIR / f"{ts_code}.csv"
         df.to_csv(out_file, index=False)
-
         time.sleep(0.1)  # 控频
 
     except Exception as e:

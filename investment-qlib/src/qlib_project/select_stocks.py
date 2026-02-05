@@ -76,46 +76,85 @@ def filter_by_industry(codes, banned_industries=("军工", "国防")):
         filtered.append(code)
     return filtered
 
-def filter_by_price(codes, min_price=5.0, min_amount_avg=30_000):
+def filter_by_price(
+    codes,
+    min_price=5.0,
+    min_amount_avg=30_000,
+    max_amp=0.15,
+    max_vwap_gap=0.05,
+    max_amount_cv=1.5,
+):
     """
-    双重过滤：
-    1. 价格过滤：剔除低价股（面值退市风险）
-    2. 成交额过滤：剔除僵尸股，保留流动性好的精华股
+    量价多维过滤（无未来函数）
     """
-    # 修正点 1：使用 len() 判断列表或数组是否为空
-    if codes is None or len(codes) == 0: 
+    if not codes:
         return []
-        
+
     try:
-        all_cal = qlib.data.D.calendar()
-        # 修正点 2：Numpy 数组不能直接用 'if not'，需检查长度
-        if len(all_cal) == 0: 
+        cal = qlib.data.D.calendar()
+        if len(cal) == 0:
             return codes
-            
-        last_day = all_cal[-1]
-        
-        # 批量获取：价格还原因子与 5日均成交额
-        fields = ["$close / $factor", "Mean($amount, 5)"]
-        df = qlib.data.D.features(codes, fields, start_time=last_day, end_time=last_day)
-        
-        # 修正点 3：Pandas DataFrame 必须使用 .empty 判断
-        if df is None or df.empty: 
+
+        last_day = cal[-1]
+
+        fields = [
+            "$close / $factor",          # 真实价格
+            "$high / $factor",
+            "$low / $factor",
+            "$vwap / $factor",
+            "Mean($amount, 5)",
+            "Std($amount, 5)",
+        ]
+
+        df = qlib.data.D.features(
+            codes, fields,
+            start_time=last_day,
+            end_time=last_day
+        )
+
+        if df is None or df.empty:
             return codes
-        
-        # 重命名列名以便操作
-        df.columns = ["raw_price", "avg_amount_5d"]
-        
-        # 逻辑判断：使用位运算符 & (注意每个条件都要加括号)
-        mask = (df["raw_price"] > min_price) & (df["avg_amount_5d"] > min_amount_avg)
-        
-        filtered_codes = df[mask].index.get_level_values('instrument').unique().tolist()
-        
-        print(f"📊 过滤报告: 原始 {len(codes)} -> 剩余 {len(filtered_codes)} (剔除 {len(codes)-len(filtered_codes)} 只)")
-        return filtered_codes
-        
+
+        df.columns = [
+            "price",
+            "high",
+            "low",
+            "vwap",
+            "amount_mean",
+            "amount_std",
+        ]
+
+        amp = (df["high"] - df["low"]) / df["price"]
+        vwap_gap = abs(df["price"] - df["vwap"]) / df["vwap"]
+        amount_cv = df["amount_std"] / df["amount_mean"]
+
+        mask = (
+            (df["price"] > min_price) &
+            (df["amount_mean"] > min_amount_avg) &
+            (amp < max_amp) &
+            (vwap_gap < max_vwap_gap) &
+            (amount_cv < max_amount_cv)
+        )
+
+        filtered = (
+            df[mask]
+            .index
+            .get_level_values("instrument")
+            .unique()
+            .tolist()
+        )
+
+        print(
+            f"📊 量价过滤: {len(codes)} → {len(filtered)} "
+            f"(剔除 {len(codes) - len(filtered)})"
+        )
+
+        return filtered
+
     except Exception as e:
         print(f"❌ 筛选异常: {e}")
         return codes
+
 
 def filter_stocks_by_finance(
     codes: List[str],
@@ -126,19 +165,22 @@ def filter_stocks_by_finance(
     or_yoy_min: float = 0.0,
     debt_to_assets_max: float = 70.0,
     current_ratio_min: float = 1.0,
-    min_valid_metrics: int = 3,   # 至少有几个指标非空
-    min_pass_metrics: int = 3,    # 至少满足几个条件
 ) -> List[str]:
     """
-    使用财务指标对股票做初步过滤（宽松版，防未来函数）
+    使用财务指标对股票做初步过滤（极宽松版）
+    规则：
+    - 有值 → 判断
+    - 无值 → 忽略
+    - 只要出现明确不达标 → 剔除
     """
+
     logger.info(f"开始财务初筛，股票数: {len(codes)}")
 
     qlib.init(provider_uri=str(FINANCE_PATH))
 
     fields = [
         "$roe",
-        "$gross_margin",
+        # "$gross_margin",
         "$or_yoy",
         "$debt_to_assets",
         "$current_ratio",
@@ -153,7 +195,7 @@ def filter_stocks_by_finance(
 
     df.columns = [
         "roe",
-        "gross_margin",
+        # "grossprofit_margin",
         "or_yoy",
         "debt_to_assets",
         "current_ratio",
@@ -169,38 +211,42 @@ def filter_stocks_by_finance(
         df_valid = df_code.dropna(how="all")
         if df_valid.empty:
             no_data_cnt += 1
+            # 财务全空：放行 or 剔除？
+            # 👉 建议放行，交给后面的模型
+            passed_codes.append(code)
             continue
 
         latest = df_valid.iloc[-1]
 
-        conditions = {
-            "roe": latest["roe"] >= roe_min if not pd.isna(latest["roe"]) else None,
-            "gross_margin": latest["gross_margin"] >= gross_margin_min if not pd.isna(latest["gross_margin"]) else None,
-            "or_yoy": latest["or_yoy"] >= or_yoy_min if not pd.isna(latest["or_yoy"]) else None,
-            "debt_to_assets": latest["debt_to_assets"] <= debt_to_assets_max if not pd.isna(latest["debt_to_assets"]) else None,
-            "current_ratio": latest["current_ratio"] >= current_ratio_min if not pd.isna(latest["current_ratio"]) else None,
-        }
+        failed = False
 
-        valid_metrics = [v for v in conditions.values() if v is not None]
-        pass_metrics = [v for v in valid_metrics if v]
+        if not pd.isna(latest["roe"]) and latest["roe"] < roe_min:
+            failed = True
 
-        if len(valid_metrics) < min_valid_metrics:
+        if not pd.isna(latest["or_yoy"]) and latest["or_yoy"] < or_yoy_min:
+            failed = True
+
+        if not pd.isna(latest["debt_to_assets"]) and latest["debt_to_assets"] > debt_to_assets_max:
+            failed = True
+
+        if not pd.isna(latest["current_ratio"]) and latest["current_ratio"] < current_ratio_min:
+            failed = True
+
+        if failed:
             filtered_cnt += 1
-            continue
-
-        if len(pass_metrics) >= min_pass_metrics:
-            passed_codes.append(code)
         else:
-            filtered_cnt += 1
+            passed_codes.append(code)
 
     logger.info(
         f"财务筛选完成 | 总数: {len(codes)} | "
-        f"无数据: {no_data_cnt} | "
+        f"无数据放行: {no_data_cnt} | "
         f"被筛掉: {filtered_cnt} | "
         f"通过: {len(passed_codes)}"
     )
 
     return passed_codes
+
+
 def main():
     # 1. 初始化 Qlib
     qlib.init(provider_uri=str(DATA_PATH))
@@ -229,9 +275,11 @@ def main():
         codes,
         start_time=(today - relativedelta(years=1)).strftime('%Y-%m-%d'),
         end_time=end_dt,
-        roe_min=5.0,
-        or_yoy_min=0.0,
-        debt_to_assets_max=70.0
+        roe_min=8.0,
+        or_yoy_min=5.0,
+        current_ratio_min=0.9,
+        debt_to_assets_max=80.0
+        # TODO: 其他可调参数  
     )
     
     # (2) 行业过滤

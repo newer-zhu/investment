@@ -371,4 +371,6 @@ def load_stock_pool(txt_path: str):
             for line in f
             if line.strip()
         ]
+    if not isinstance(instruments, (list, tuple)):
+        instruments = list(instruments)
     return instruments

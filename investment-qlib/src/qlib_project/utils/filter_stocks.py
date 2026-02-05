@@ -403,29 +403,6 @@ def get_industry_from_cache(code):
 #         "总分": total_score
 #     }
 
-# """多线程选股"""
-# def pick_stocks_multithread(max_workers=20, strategy="a"):
-#     logger.info(f"开始多线程选股，线程数: {max_workers}")
-#     stock_list = load_filter_lists(strategy)
-#     logger.info(f"待筛选股票数量: {len(stock_list)}")
-    
-#     if stock_list.empty:
-#         logger.warning("股票列表为空，无法进行选股")
-#         return pd.DataFrame()
-    
-#     results = []
-
-#     with ThreadPoolExecutor(max_workers=max_workers) as executor:
-#         futures = [executor.submit(check_stock, code) for code in stock_list['code'].tolist()]
-
-#         # 在每次执行一个任务后更新进度条
-#         for future in tqdm(as_completed(futures), total=len(stock_list), desc="选股中", unit="只"):
-#             result = future.result()
-#             if result:
-#                 results.append(result)
-
-#     logger.info(f"选股完成，共选出 {len(results)} 只符合条件的股票")
-#     return pd.DataFrame(results)
 
 # def calculate_technical_score(symbol: str, start_date: str, end_date: str, adjust: str = "qfq") -> float:
 #     """
@@ -784,42 +761,5 @@ def get_industry_from_cache(code):
 
 #     return float(min(100.0, max(0.0, score)))
 
-
-# def save_and_print_picked(
-#     picked: pd.DataFrame,
-#     prefix="picked_stocks",
-#     folder="output",
-#     code_column="代码",
-# ):
-#     """
-#     打印并导出选中的股票列表（人类可读 + qlib 股票池）
-#     """
-#     if picked is None or picked.empty:
-#         logger.warning("没有选中的股票")
-#         return
-
-#     # ========= 1. 打印 =========
-#     logger.info("初步选中的股票：")
-#     logger.info(f"\n{picked.to_string()}")
-
-#     # ========= 2. 普通 CSV 导出 =========
-#     today = datetime.date.today()
-#     today_str = today.strftime("%Y%m%d")
-
-#     os.makedirs(folder, exist_ok=True)
-#     normal_path = os.path.join(folder, f"{prefix}_{today_str}.csv")
-
-#     picked.to_csv(normal_path, index=False, encoding="utf-8-sig")
-#     logger.info(f"已导出文件：{normal_path}")
-#     # ========= 生成 qlib 股票池 =========
-#     top_codes = picked["代码"].dropna().astype(str).tolist()
-#     instruments = pd.Series(top_codes).map(_to_qlib_instrument)
-#     qlib_pool_df = pd.DataFrame({"instrument": instruments}).drop_duplicates()
-
-#     qlib_date = datetime.date.today().strftime("%Y-%m-%d")
-#     os.makedirs(QLIB_POOL_DIR, exist_ok=True)
-#     qlib_path = os.path.join(QLIB_POOL_DIR, f"{qlib_date}_pool.csv")
-#     qlib_pool_df.to_csv(qlib_path, index=False, encoding="utf-8")
-#     logger.info(f"已导出 qlib 股票池：{qlib_path}")
     
     
