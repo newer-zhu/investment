@@ -4,7 +4,66 @@ import os
 import datetime
 from utils.logger import logger
 from utils.util import get_prev_trade_date, find_first_missing_trade_date
+import tushare as ts
+import pandas as pd
+from pathlib import Path
+from constants import SOURCE_PATH
+token = "2f80f707c09dc4ce6c59eb215739349f7a203485b19b4401a683bb6549ec"
 
+pro = ts.pro_api(token)
+
+pro._DataApi__token = token # 保证有这个代码，不然不可以获取
+pro._DataApi__http_url = 'http://lianghua.nanyangqiankun.top'  # 保证有这个代码，不然不可以获取
+
+def get_industry_by_code(
+    code: str,
+    csv_path: str = SOURCE_PATH / "cache" / "stock_basic.csv"
+) -> str | None:
+    """
+    根据 ts_code 获取 industry：
+    1. 先查本地 CSV
+    2. 如果没有，再请求 tushare，并追加到 CSV
+    """
+    csv_path = Path(csv_path)
+
+    # ---------- 1. 查本地缓存 ----------
+    if csv_path.exists():
+        df_cache = pd.read_csv(csv_path, dtype=str)
+        hit = df_cache[df_cache["ts_code"] == code]
+        if not hit.empty:
+            return hit.iloc[0]["industry"]
+
+    # ---------- 2. 缓存未命中，请求 tushare ----------
+    df = pro.stock_basic(
+        ts_code=code,
+        list_status="L",
+        fields=[
+            "ts_code",
+            "symbol",
+            "name",
+            "area",
+            "industry",
+            "cnspell",
+            "market",
+            "list_date",
+            "delist_date",
+            "exchange"
+        ]
+    )
+
+    if df is None or df.empty:
+        return None
+
+    # ---------- 3. 追加写回 CSV ----------
+    if csv_path.exists():
+        df_all = pd.concat([df_cache, df], ignore_index=True)
+        df_all = df_all.drop_duplicates(subset=["ts_code"])
+    else:
+        df_all = df
+
+    df_all.to_csv(csv_path, index=False, encoding="utf-8-sig")
+
+    return df.iloc[0]["industry"]
 
 
 def get_stock_history(

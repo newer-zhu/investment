@@ -374,3 +374,15 @@ def load_stock_pool(txt_path: str):
     if not isinstance(instruments, (list, tuple)):
         instruments = list(instruments)
     return instruments
+
+def qlib_to_tushare(code: str) -> str:
+    """
+    SH600000 -> 600000.SH
+    SZ000001 -> 000001.SZ
+    """
+    code = code.strip().upper()
+    if code.startswith("SH"):
+        return code[2:] + ".SH"
+    if code.startswith("SZ"):
+        return code[2:] + ".SZ"
+    raise ValueError(f"Unknown code format: {code}")
