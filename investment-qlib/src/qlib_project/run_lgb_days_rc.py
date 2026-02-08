@@ -275,7 +275,7 @@ def run_short_term_strategy(
 
 if __name__ == "__main__":
     run_short_term_strategy(
-        pool_date="2026-02-05", 
+        pool_date="2026-02-06", 
         hold_days=2, 
         bias_limit=0.10, # 如果你觉得牛市很疯狂，可以调高到 0.15
         topk=10

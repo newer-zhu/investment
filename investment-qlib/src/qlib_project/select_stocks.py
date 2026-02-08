@@ -8,8 +8,10 @@ from dateutil.relativedelta import relativedelta
 from constants import DATA_PATH, FINANCE_PATH
 # 导入你的行业工具
 from utils.filter_stocks import get_industry_from_cache
-from typing import List
+from typing import Iterable, List
 from utils.logger import logger
+from utils.util import is_industry, qlib_to_tushare
+from utils.api import get_industry_by_code
 # ================= 路径配置 =================
 
 OUTPUT_PATH = DATA_PATH / "instruments" / "my_filtered_pool.txt"
@@ -52,40 +54,69 @@ def filter_mainboard_stocks(codes):
 
     return filtered
 
-def filter_by_industry(codes, banned_industries=("军工", "国防")):
+def filter_by_industry(
+    codes: list[str],
+    banned_industries: Iterable[str],
+) -> list[str]:
     """
-    根据行业关键字过滤股票
+    行业过滤：
+    - 命中 banned_industries → 剔除
+    - 行业缺失 / 未识别 → 放行（宽松）
     """
-    filtered = []
+
+    if not codes:
+        return []
+
+    banned_keywords = list(banned_industries)
+
+    passed = []
+    filtered = 0
+    no_industry = 0
+
     for code in codes:
-        # 统一处理代码格式，提取纯数字部分用于查询缓存
-        pure_code = "".join(filter(str.isdigit, code))
         try:
-            industry = get_industry_from_cache(pure_code)
-        except Exception:
-            # 缓存异常则跳过该股
-            continue
+            # QLib → Tushare
+            ts_code = qlib_to_tushare(code)
 
-        if not industry:
-            continue
+            # 获取行业字符串
+            industry = get_industry_by_code(ts_code)
 
-        # 命中黑名单行业，排除
-        if any(bad in industry for bad in banned_industries):
-            continue
+            if not industry:
+                # 行业缺失，放行
+                no_industry += 1
+                passed.append(code)
+                continue
 
-        filtered.append(code)
-    return filtered
+            # 命中禁用行业关键词 → 剔除
+            if is_industry(industry, banned_keywords):
+                filtered += 1
+                continue
+
+            passed.append(code)
+
+        except Exception as e:
+            # 出异常也放行，防止误杀
+            passed.append(code)
+
+    print(
+        f"🏭 行业过滤 | 原始 {len(codes)} | "
+        f"剔除 {filtered} | "
+        f"行业缺失放行 {no_industry} | "
+        f"剩余 {len(passed)}"
+    )
+
+    return passed
 
 def filter_by_price(
     codes,
     min_price=5.0,
-    min_amount_avg=30_000,
+    min_amount_avg=5000.0,  # 提高到 5000万，彻底告别织布机
     max_amp=0.15,
     max_vwap_gap=0.05,
     max_amount_cv=1.5,
 ):
     """
-    量价多维过滤（无未来函数）
+    针对你的数据列适配：自动处理复权和流动性
     """
     if not codes:
         return []
@@ -94,16 +125,18 @@ def filter_by_price(
         cal = qlib.data.D.calendar()
         if len(cal) == 0:
             return codes
-
         last_day = cal[-1]
 
+        # 核心：根据你提供的列名进行 Qlib 取数
         fields = [
-            "$close / $factor",          # 真实价格
-            "$high / $factor",
-            "$low / $factor",
-            "$vwap / $factor",
-            "Mean($amount, 5)",
-            "Std($amount, 5)",
+            "$close / $factor",           # 真实收盘价（复权处理）
+            "$high / $factor",            # 真实最高价
+            "$low / $factor",             # 真实最低价
+            "$vwap / $factor",            # 真实成交均价
+            "Mean($amount, 20) ",  # 近20日均成交额（转为万元）
+            "Std($amount, 20) ",   # 成交额波动（转为万元）
+            # 由于你的列里没有 market_cap，我们通过 价格 * 因子 的某种逻辑，
+            # 或者建议你在 dump 时把市值也带上。如果暂时没有，就先靠成交额硬扛。
         ]
 
         df = qlib.data.D.features(
@@ -116,74 +149,62 @@ def filter_by_price(
             return codes
 
         df.columns = [
-            "price",
-            "high",
-            "low",
-            "vwap",
-            "amount_mean",
-            "amount_std",
+            "real_price", "real_high", "real_low", "real_vwap",
+            "amount_mean", "amount_std"
         ]
 
-        amp = (df["high"] - df["low"]) / df["price"]
-        vwap_gap = abs(df["price"] - df["vwap"]) / df["vwap"]
-        amount_cv = df["amount_std"] / df["amount_mean"]
+        # --- 过滤逻辑 ---
+        # 1. 计算真实振幅
+        amp = (df["real_high"] - df["real_low"]) / df["real_price"]
+        # 2. 价格与均价偏离
+        vwap_gap = abs(df["real_price"] - df["real_vwap"]) / df["real_vwap"]
+        # 3. 流动性稳定性
+        amount_cv = df["amount_std"] / (df["amount_mean"] + 1e-6)
 
         mask = (
-            (df["price"] > min_price) &
-            (df["amount_mean"] > min_amount_avg) &
+            (df["real_price"] > min_price) &           # 价格门槛
+            (df["amount_mean"] > min_amount_avg) &    # 流动性门槛 (关键！)
             (amp < max_amp) &
             (vwap_gap < max_vwap_gap) &
             (amount_cv < max_amount_cv)
         )
 
-        filtered = (
-            df[mask]
-            .index
-            .get_level_values("instrument")
-            .unique()
-            .tolist()
-        )
-
-        print(
-            f"📊 量价过滤: {len(codes)} → {len(filtered)} "
-            f"(剔除 {len(codes) - len(filtered)})"
-        )
-
+        filtered = df[mask].index.get_level_values("instrument").unique().tolist()
+        
+        print(f"✅ 量价精筛完成: {len(codes)} -> {len(filtered)} (过滤掉成交低迷的僵尸股)")
         return filtered
 
     except Exception as e:
-        print(f"❌ 筛选异常: {e}")
+        print(f"❌ filter_by_price 异常: {e}")
         return codes
-
+    
 
 def filter_stocks_by_finance(
     codes: List[str],
     start_time: str,
     end_time: str,
-    roe_min: float = 10.0,
-    gross_margin_min: float = 20.0,
+    # 基础阈值设置
     or_yoy_min: float = 0.0,
-    debt_to_assets_max: float = 70.0,
+    debt_to_assets_max: float = 75.0,
     current_ratio_min: float = 1.0,
+    # 新增：最小现金流规模（用于替代市值筛选，单位：元）
+    # 假设 1000万 是一个极小公司的门槛
+    min_fcff_abs: float = 10_000_000.0 
 ) -> List[str]:
     """
-    使用财务指标对股票做初步过滤（极宽松版）
-    规则：
-    - 有值 → 判断
-    - 无值 → 忽略
-    - 只要出现明确不达标 → 剔除
+    独立财务精筛：利用多维财务指标过滤“虚假繁荣”的小盘僵尸股
     """
-
-    logger.info(f"开始财务初筛，股票数: {len(codes)}")
+    logger.info(f"开始深度财务过滤，初始股票数: {len(codes)}")
 
     qlib.init(provider_uri=str(FINANCE_PATH))
 
+    # 1. 充分利用你 CSV 中的所有列
     fields = [
-        "$roe",
-        # "$gross_margin",
-        "$or_yoy",
-        "$debt_to_assets",
-        "$current_ratio",
+        "$roe", "$roe_dt", "$roa", "$roic", 
+        "$grossprofit_margin", "$netprofit_margin", 
+        "$or_yoy", "$netprofit_yoy", "$roe_yoy",
+        "$debt_to_assets", "$current_ratio", "$quick_ratio",
+        "$interestdebt", "$ocf_yoy", "$fcff", "$fcfe"
     ]
 
     df = D.features(
@@ -193,59 +214,103 @@ def filter_stocks_by_finance(
         end_time=end_time,
     )
 
+    if df is None or df.empty:
+        return codes
+
+    # 映射列名
     df.columns = [
-        "roe",
-        # "grossprofit_margin",
-        "or_yoy",
-        "debt_to_assets",
-        "current_ratio",
+        "roe", "roe_dt", "roa", "roic", 
+        "gpm", "npm", 
+        "or_yoy", "netprofit_yoy", "roe_yoy",
+        "debt_to_assets", "current_ratio", "quick_ratio",
+        "interestdebt", "ocf_yoy", "fcff", "fcfe"
     ]
 
     passed_codes = []
-    no_data_cnt = 0
-    filtered_cnt = 0
-
+    
     for code, df_code in df.groupby(level="instrument"):
         df_code = df_code.droplevel("instrument")
-
         df_valid = df_code.dropna(how="all")
+
         if df_valid.empty:
-            no_data_cnt += 1
-            # 财务全空：放行 or 剔除？
-            # 👉 建议放行，交给后面的模型
-            passed_codes.append(code)
+            # 这里的策略：如果没有财务数据，说明可能是新股或数据缺失，通常选择不放行以规避织布机
             continue
 
         latest = df_valid.iloc[-1]
+        industry = get_industry_by_code(qlib_to_tushare(code))
+        
+        # 判断是否为科技/成长型行业
+        is_tech = is_industry(industry, ["科技", "半导体", "互联网",
+                                         "新能源", "软件", "芯片", "AI",
+                                         "通信", "电子", "计算机", "汽车"])
 
+        # ==========================================
+        # 核心过滤逻辑 1：规模与流动性替代指标
+        # ==========================================
+        # 织布机通常是那些 FCFF（自由现金流）极小的公司
+        # 如果 FCFF 绝对值太小（例如只有几百万），在市场上大概率无人问津
+        if not pd.isna(latest["fcff"]) and abs(latest["fcff"]) < min_fcff_abs:
+            continue
+
+        # ==========================================
+        # 核心过滤逻辑 2：行业定制化判断
+        # ==========================================
         failed = False
 
-        if not pd.isna(latest["roe"]) and latest["roe"] < roe_min:
-            failed = True
+        if is_tech:
+            # --- 科技类：侧重增长与毛利，放宽 ROE ---
+            # 1. ROE 底线放低到 5%
+            if latest["roe"] < 5.0:
+                # 除非增长极快 (营收增长 > 25% 或 利润增长 > 40%)
+                if not (latest["or_yoy"] > 25 or latest["netprofit_yoy"] > 40):
+                    failed = True
+            
+            # 2. 毛利率（GPM）必须维持在高位，否则说明没有核心竞争力
+            if not pd.isna(latest["gpm"]) and latest["gpm"] < 20.0:
+                failed = True
+                
+            # 3. 现金流不能太难看（OCF增长不能长期大幅落后利润增长）
+            if not pd.isna(latest["ocf_yoy"]) and latest["ocf_yoy"] < -50:
+                failed = True
 
-        if not pd.isna(latest["or_yoy"]) and latest["or_yoy"] < or_yoy_min:
-            failed = True
+        else:
+            # --- 传统类：侧重资本效率 (ROIC) 和 稳定性 ---
+            # 1. ROE 硬门槛 10%
+            if latest["roe"] < 10.0:
+                failed = True
+                
+            # 2. 引入 ROIC (投入资本回报率)，看剔除杠杆后的真实盈利能力
+            if not pd.isna(latest["roic"]) and latest["roic"] < 7.0:
+                failed = True
+                
+            # 3. 营收不能萎缩
+            if not pd.isna(latest["or_yoy"]) and latest["or_yoy"] < -5:
+                failed = True
 
+        # ==========================================
+        # 核心过滤逻辑 3：通用财务安全性 (兜底)
+        # ==========================================
+        # 1. 负债率
         if not pd.isna(latest["debt_to_assets"]) and latest["debt_to_assets"] > debt_to_assets_max:
             failed = True
-
-        if not pd.isna(latest["current_ratio"]) and latest["current_ratio"] < current_ratio_min:
+            
+        # 2. 流动性安全：速动比率 (Quick Ratio) 
+        # 比 current_ratio 更严格，剔除了存货，防止存货积压的小公司
+        if not pd.isna(latest["quick_ratio"]) and latest["quick_ratio"] < 0.6:
             failed = True
 
-        if failed:
-            filtered_cnt += 1
-        else:
+        # 3. 剔除北交所（BJ）的小票 —— 织布机的重灾区
+        # 如果你确实不想看织布机，北交所 80% 的票都可以直接过滤
+        if code.startswith("BJ"):
+            # 对北交所执行极高门槛，或者直接剔除
+            if latest["fcff"] < 50_000_000: # 北交所公司 FCFF 必须大于 5000万 才看
+                failed = True
+
+        if not failed:
             passed_codes.append(code)
 
-    logger.info(
-        f"财务筛选完成 | 总数: {len(codes)} | "
-        f"无数据放行: {no_data_cnt} | "
-        f"被筛掉: {filtered_cnt} | "
-        f"通过: {len(passed_codes)}"
-    )
-
+    logger.info(f"财务精筛完成 | 最终入选: {len(passed_codes)} | 过滤比例: {(1 - len(passed_codes)/len(codes))*100:.1f}%")
     return passed_codes
-
 
 def main():
     # 1. 初始化 Qlib
@@ -266,27 +331,24 @@ def main():
     codes = filter_mainboard_stocks(codes)
     print(f"主板过滤后数量: {len(codes)}")
     
-        # (3) 价格过滤
+    # (2) 行业过滤
+    codes = filter_by_industry(codes, banned_industries=("军工", "国防","银行"))
+    print(f"行业过滤后数量: {len(codes)}")
+    
+    # (3) 价格过滤
     codes = filter_by_price(codes, min_price=5.0)
     print(f"价格过滤后数量: {len(codes)}")
     
     # (4) 财务指标过滤
     codes = filter_stocks_by_finance(
         codes,
-        start_time=(today - relativedelta(years=1)).strftime('%Y-%m-%d'),
+        start_time=(today - relativedelta(months=6)).strftime('%Y-%m-%d'),
         end_time=end_dt,
-        roe_min=8.0,
-        or_yoy_min=5.0,
-        current_ratio_min=0.9,
-        debt_to_assets_max=80.0
+        # or_yoy_min=5.0,
+        # current_ratio_min=0.9,
+        # debt_to_assets_max=80.0
         # TODO: 其他可调参数  
     )
-    
-    # (2) 行业过滤
-    # codes = filter_by_industry(codes, banned_industries=("军工", "国防","银行"))
-    # print(f"行业过滤后数量: {len(codes)}")
-    
-
 
     # 4. 保存为单列 TXT
     if codes:

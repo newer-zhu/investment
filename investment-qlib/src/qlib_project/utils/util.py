@@ -386,3 +386,14 @@ def qlib_to_tushare(code: str) -> str:
     if code.startswith("SZ"):
         return code[2:] + ".SZ"
     raise ValueError(f"Unknown code format: {code}")
+
+
+def tushare_to_qlib(code: str) -> str:
+    """
+    600000.SH -> SH600000
+    000001.SZ -> SZ000001
+    """
+    if "." not in str(code):
+        return code
+    num, exch = code.split(".")
+    return f"{exch.upper()}{num}"
