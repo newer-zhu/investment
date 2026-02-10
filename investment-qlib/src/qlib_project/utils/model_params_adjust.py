@@ -70,40 +70,40 @@
 
 def get_model_params(hold_days: int):
     """
-    【最终排序优化版】
-    目标：提升 RankIC_IR，增强模型在极端波动环境下的稳健性
-    核心改动：切换至 Huber 损失函数，并引入更严格的复杂度控制
+    【科技短线攻击版】
+    目标：捕捉高波动科技股的短期爆发信号
+    改动：增加模型表达能力，针对科技股特有的“非线性”逻辑进行调优
     """
 
-    # 1. 基础配置：引入 huber 目标函数
     params = {
-        "objective": "huber",          # 🟢 核心改动：抗离群值，保护排序稳定性
-        "alpha": 0.9,                  # Huber 的阈值，控制对异常值的容忍度
-        "metric": "huber",             # 监控 huber 损失
+        "objective": "huber",          # 保持 Huber，防止个别妖股把模型带偏
+        "alpha": 0.85,                 # 略微调低，对异常波动稍微敏感一点点
+        "metric": "huber",
         "n_jobs": -1,
         "verbosity": -1,
-        "early_stopping_rounds": 100,
-        "extra_trees": True,           # 保持随机性，抑制震荡
+        "early_stopping_rounds": 80,   # 稍微收紧，防止在噪音过大的科技股里过拟合
+        "extra_trees": True,
     }
 
-    # 2. 周期配置表 (针对 Huber 调整)
+    # 2. 周期配置表 (针对科技股短线重写)
     configs = {
-        # 针对 2 天持仓 (hold_days=2)，我们进一步收紧学习率
-        1: {"est": 800,  "lr": 0.03, "l1": 0.2, "l2": 0.5, "depth": 4},
-        2: {"est": 1200, "lr": 0.02, "l1": 0.5, "l2": 1.0, "depth": 3}, 
-        3: {"est": 1400, "lr": 0.015,"l1": 0.5, "l2": 0.5, "depth": 3},
-        4: {"est": 1600, "lr": 0.01, "l1": 0.3, "l2": 0.3, "depth": 3},
-        5: {"est": 1800, "lr": 0.01, "l1": 0.1, "l2": 0.1, "depth": 3},
+        # 1-2天持仓：科技股弹性最大，需要更深一点的树和更灵敏的速率
+        1: {"est": 1000, "lr": 0.05,  "l1": 0.5, "l2": 1.0, "depth": 5},
+        2: {"est": 1200, "lr": 0.04,  "l1": 0.5, "l2": 1.5, "depth": 4}, 
+        3: {"est": 1400, "lr": 0.03,  "l1": 0.3, "l2": 1.0, "depth": 4},
+        4: {"est": 1500, "lr": 0.02,  "l1": 0.2, "l2": 0.5, "depth": 4},
+        5: {"est": 1600, "lr": 0.015, "l1": 0.1, "l2": 0.2, "depth": 4},
     }
     
     c = configs.get(hold_days, configs[3])
 
-    # 3. 动态计算（基于你的 CSI300 样本量）
-    dynamic_num_leaves = int((2 ** c["depth"]) * 0.75)
+    # 3. 动态计算
+    # 科技股池子通常比全市场小，num_leaves 不宜过大
+    dynamic_num_leaves = int((2 ** c["depth"]) * 0.8)
     
-    # 调大最小样本数，防止模型钻牛角尖
-    dynamic_min_data = int(60 - hold_days * 5) 
-    dynamic_min_data = max(30, min(80, dynamic_min_data))
+    # 科技股样本相对少，且波动大，min_data 调低一点，允许模型捕捉更细分的局部机会
+    dynamic_min_data = int(45 - hold_days * 5) 
+    dynamic_min_data = max(20, min(60, dynamic_min_data))
 
     # 4. 参数注入
     params.update({
@@ -114,11 +114,11 @@ def get_model_params(hold_days: int):
         "lambda_l2": c["l2"],
         "num_leaves": dynamic_num_leaves,
         "min_data_in_leaf": dynamic_min_data,
-        "feature_fraction": 0.65,      # 略微降低，强制让不同决策树看不同的黄金特征
+        "feature_fraction": 0.7,      # 提高特征采样，因为科技股依赖多个因子的共振
         "bagging_fraction": 0.75,
         "bagging_freq": 1,
     })
 
-    print(f"🎯 排序优化版启动 (Hold: {hold_days}d): Obj=Huber, Depth={c['depth']}, MinData={dynamic_min_data}")
+    print(f"🚀 科技短线版启动 (Hold: {hold_days}d): LR={c['lr']}, Depth={c['depth']}, MinData={dynamic_min_data}")
     
     return params

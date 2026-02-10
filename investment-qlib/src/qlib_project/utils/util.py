@@ -11,11 +11,72 @@ from email.mime.multipart import MIMEMultipart
 from email.header import Header
 from utils.logger import logger
 import time
+from functools import lru_cache
 
 OUTPUT_FOLDER = "output"
 FILENAME_PREFIX = "picked_stocks"
 LAST_CALL_TIME = 0
 MIN_INTERVAL = 1.5  # 秒
+
+import pandas as pd
+from pathlib import Path
+from typing import Dict, Optional
+from constants import SOURCE_PATH
+def get_latest_financial_row(
+    code: str, 
+    bs_dir: str= SOURCE_PATH / "cache" / "balance", 
+    is_dir: str= SOURCE_PATH / "cache" / "income", 
+    cf_dir: str= SOURCE_PATH / "cache" / "cashflow"
+) -> Dict[str, any]:
+    """
+    从三大表 CSV 目录中提取指定股票的最新财务特征
+    :param code: 股票代码, 如 "600435.SH"
+    :param bs_dir: 资产负债表 CSV 存放目录
+    :param is_dir: 利润表 CSV 存放目录
+    :param cf_dir: 现金流量表 CSV 存放目录
+    """
+    # 统一转换文件名格式 (假设为 600435.SH.csv)
+    file_name = f"{code}.csv"
+    
+    # 我们关心的排雷核心字段
+    target_fields = {
+        'bs': ['end_date', 'total_assets', 'goodwill', 'accounts_receiv', 'money_cap', 'total_cur_liab'],
+        'is': ['end_date', 'revenue', 'rd_exp', 'n_income_attr_p'],
+        'cf': ['end_date', 'c_fr_sale_sg', 'n_cashflow_act']
+    }
+    
+    result = {}
+
+    def _read_latest_from_dir(directory: str, fields: list) -> Optional[pd.Series]:
+        path = Path(directory) / file_name
+        if not path.exists():
+            return None
+        
+        try:
+            # 只读取需要的列以节省内存
+            df = pd.read_csv(path, usecols=lambda x: x in fields or x == 'end_date')
+            if df.empty: return None
+            
+            # 按报告期排序，取最新一条记录
+            # 如果你的数据里有 ann_date (公告日)，建议按 ann_date 排序更符合实盘逻辑
+            df['end_date'] = pd.to_datetime(df['end_date'])
+            return df.sort_values('end_date').iloc[-1]
+        except Exception as e:
+            # print(f"读取 {path} 出错: {e}")
+            return None
+
+    # 分别从三个文件夹抓取
+    bs_row = _read_latest_from_dir(bs_dir, target_fields['bs'])
+    is_row = _read_latest_from_dir(is_dir, target_fields['is'])
+    cf_row = _read_latest_from_dir(cf_dir, target_fields['cf'])
+
+    # 合并数据到字典
+    if bs_row is not None: result.update(bs_row.to_dict())
+    if is_row is not None: result.update(is_row.to_dict())
+    if cf_row is not None: result.update(cf_row.to_dict())
+
+    return result
+
 
 def throttle():
     global LAST_CALL_TIME
@@ -164,17 +225,13 @@ def safe_get(df, field):
         return 0
     return val
 
+@lru_cache(maxsize=1024)
 def is_industry(industry: str, keywords: list[str]) -> bool:
-    """
-    判断行业是否属于给定的关键词列表（模糊匹配）
-
-    :param industry: 行业名称（字符串）
-    :param keywords: 关键词列表，例如 ["科技", "半导体", "新能源"]
-    :return: True 如果行业名称包含任一关键词，否则 False
-    """
     if not industry:
         return False
-    return any(k in industry for k in keywords)
+    industry = industry.lower()
+    return any(k.lower() in industry for k in keywords)
+
 
 def format_symbol(code: str) -> str:
     """

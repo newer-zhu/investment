@@ -3,6 +3,7 @@ from pathlib import Path
 import pandas as pd
 from tqdm import tqdm
 import tushare as ts
+from utils.util import tushare_to_qlib 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 SOURCE_PATH = PROJECT_ROOT / "data" / "cache" / "stock_basic.csv"
@@ -76,12 +77,14 @@ print(f"Total stocks: {len(ts_codes)}")
 
 for ts_code in tqdm(ts_codes):
     try:
-        out_file = OUT_DIR / f"{ts_code}.csv"
+        qlib_code = tushare_to_qlib(ts_code)
+        out_file = OUT_DIR / f"{qlib_code}.csv"
 
         df_new = download_one(ts_code)
         if df_new is None or df_new.empty:
             continue
 
+        df_new["symbol"] = qlib_code
         if out_file.exists():
             df_old = pd.read_csv(out_file)
             df_old["ann_date"] = pd.to_datetime(df_old["ann_date"])
@@ -91,7 +94,7 @@ for ts_code in tqdm(ts_codes):
 
             # 🔑 核心：基于财报事实去重
             df_all = df_all.drop_duplicates(
-                subset=["ts_code", "ann_date", "end_date"],
+                subset=["symbol", "ann_date", "end_date"],
                 keep="last",
             )
         else:
