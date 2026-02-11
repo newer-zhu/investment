@@ -65,6 +65,15 @@ def get_industry_by_code(
 
     return df.iloc[0]["industry"]
 
+def get_name_by_code(
+    code: str,
+    csv_path: str = SOURCE_PATH / "cache" / "stock_basic.csv"
+) -> str | None:
+    csv_path = Path(csv_path)
+    df_cache = pd.read_csv(csv_path, dtype=str)
+    hit = df_cache[df_cache["ts_code"] == code]
+    if not hit.empty:
+        return hit.iloc[0]["name"]
 
 def get_stock_history(
     symbol: str,

@@ -4,6 +4,7 @@ from datetime import datetime
 import qlib
 from qlib.data import D
 import pandas as pd
+from typing import List, Dict
 from dateutil.relativedelta import relativedelta
 from constants import DATA_PATH, FINANCE_PATH, TECH_KEYWORDS
 # 导入你的行业工具
@@ -11,7 +12,7 @@ from utils.filter_stocks import get_industry_from_cache
 from typing import Iterable, List
 from utils.logger import logger
 from utils.util import is_industry, qlib_to_tushare, get_latest_financial_row
-from utils.api import get_industry_by_code
+from utils.api import get_industry_by_code, get_name_by_code
 # ================= 路径配置 =================
 
 OUTPUT_PATH = DATA_PATH / "instruments" / "my_filtered_pool.txt"
@@ -78,6 +79,9 @@ def filter_by_industry(
             # QLib → Tushare
             ts_code = qlib_to_tushare(code)
 
+            if "ST" in get_name_by_code(ts_code).upper():
+                continue
+            
             # 获取行业字符串
             industry = get_industry_by_code(ts_code)
 
@@ -297,8 +301,6 @@ def filter_stocks_by_finance(
     logger.info(f"短线精筛完成 | 留存: {len(passed_codes)} | 过滤比例降低，攻击性提升")
     return passed_codes
 
-from typing import List, Dict
-
 
 def filter_stocks_by_finance_tech_short(
     codes: List[str],
@@ -412,6 +414,89 @@ def filter_stocks_by_finance_tech_short(
     logger.info(f"科技短线排雷完成 | 入选: {len(passed)} | 过滤比例: {(1 - len(passed)/len(codes))*100:.1f}%")
     return passed
 
+
+def filter_short_term_stocks(
+    codes: List[str],
+    start_time: str,
+    end_time: str,
+    # 基础阈值设置
+    or_yoy_min: float = 15.0,  # 营收年增长至少15%
+    roe_min: float = 3.0,  # 最低ROE 3%
+    gpm_min: float = 12.0,  # 毛利率门槛 12%
+    min_fcff_abs: float = 2_000_000.0,  # 最小现金流 200万
+    debt_to_assets_max: float = 85.0  # 最大负债率 85%
+) -> List[str]:
+    """
+    适合短线的股票筛选：没有行业限制，专注于财务指标过滤
+    """
+    logger.info(f"开始短线筛选，初始股票数: {len(codes)}")
+
+    qlib.init(provider_uri=str(FINANCE_PATH))
+
+    # 1. 需要的财务字段
+    fields = [
+        "$or_yoy", "$roe", "$gpm", "$fcff", "$debt_to_assets", "$interestdebt"
+    ]
+
+    df = D.features(
+        instruments=codes,
+        fields=fields,
+        start_time=start_time,
+        end_time=end_time,
+    )
+
+    if df is None or df.empty:
+        return codes
+
+    # 映射列名
+    df.columns = [
+        "or_yoy", "roe", "gpm", "fcff", "debt_to_assets", "interestdebt"
+    ]
+
+    passed_codes = []
+
+    for code, df_code in df.groupby(level="instrument"):
+        df_code = df_code.droplevel("instrument")
+        df_valid = df_code.dropna(how="all")
+
+        if df_valid.empty:
+            # 无数据的跳过
+            continue
+
+        latest = df_valid.iloc[-1]
+
+        failed = False
+
+        # 核心过滤逻辑 1：营收年增长 > 15%
+        if latest["or_yoy"] < or_yoy_min:
+            failed = True
+        
+        # 核心过滤逻辑 2：ROE >= 3%
+        if latest["roe"] < roe_min:
+            failed = True
+
+        # 核心过滤逻辑 3：毛利率 >= 12%
+        if latest["gpm"] < gpm_min:
+            failed = True
+
+        # 核心过滤逻辑 4：现金流大于最低门槛
+        if not pd.isna(latest["fcff"]) and abs(latest["fcff"]) < min_fcff_abs:
+            failed = True
+
+        # 核心过滤逻辑 5：负债率低于85%
+        if not pd.isna(latest["debt_to_assets"]) and latest["debt_to_assets"] > debt_to_assets_max:
+            failed = True
+
+        # 核心过滤逻辑 6：长期债务少，避免陷入债务危机
+        if not pd.isna(latest["interestdebt"]) and latest["interestdebt"] < 5_000_000:
+            failed = True
+
+        if not failed:
+            passed_codes.append(code)
+
+    logger.info(f"短线筛选完成 | 留存: {len(passed_codes)} | 过滤比例降低")
+    return passed_codes
+
 def main():
     # 1. 初始化 Qlib
     qlib.init(provider_uri=str(DATA_PATH))
@@ -432,8 +517,8 @@ def main():
     print(f"主板过滤后数量: {len(codes)}")
     
     # (2) 行业过滤
-    # codes = filter_by_industry(codes, banned_industries=("军工", "国防","银行"))
-    # print(f"行业过滤后数量: {len(codes)}")
+    codes = filter_by_industry(codes, banned_industries=("军工", "国防","银行"))
+    print(f"行业过滤后数量: {len(codes)}")
     
     # (3) 价格过滤
     codes = filter_by_price(codes, min_price=5.0)
@@ -454,7 +539,6 @@ def main():
         codes,
         start_time=(today - relativedelta(months=6)).strftime('%Y-%m-%d'),
         end_time=end_dt,)
-
 
     # 4. 保存为单列 TXT
     if codes:

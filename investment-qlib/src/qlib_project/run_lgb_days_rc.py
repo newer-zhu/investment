@@ -81,8 +81,8 @@ def run_short_term_strategy(
     
     qlib.init(provider_uri=str(DATA_PATH), region=REG_CN)
     target_dt = pd.Timestamp(pool_date)
-    # instruments = load_stock_pool(FILTERED_POOL)
-    instruments = CSI300_PATH
+    instruments = load_stock_pool(FILTERED_POOL)
+    # instruments = CSI300_PATH
 
     valid_start = pd.Timestamp(test_start) - pd.Timedelta(days=90) 
     valid_start_str = valid_start.strftime('%Y-%m-%d')
@@ -201,7 +201,7 @@ def run_short_term_strategy(
 
 if __name__ == "__main__":
     run_short_term_strategy(
-        pool_date="2026-02-09", 
+        pool_date="2026-02-10", 
         hold_days=2, 
         bias_limit=0.10, 
         topk=10
