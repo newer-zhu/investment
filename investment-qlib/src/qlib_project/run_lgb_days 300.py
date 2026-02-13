@@ -95,6 +95,10 @@ def run_dynamic_predict(
     pred_df = pred.reset_index()
     pred_df.columns = ["datetime", "instrument", "score"]
 
+    RESULT_DIR.mkdir(parents=True, exist_ok=True)
+    pred_path = RESULT_DIR / "full_test_predictions.pkl"
+    pred_df.to_pickle(pred_path)
+    print(f"✅ 全量预测数据已保存至: {pred_path} (用于回测)")
     # 只取 pool_date 当天的数据
     target_date = pd.Timestamp(pool_date)
     today_pred = pred_df[pred_df["datetime"] == target_date].copy()

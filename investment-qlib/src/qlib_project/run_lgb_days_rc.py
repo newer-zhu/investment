@@ -129,6 +129,11 @@ def run_short_term_strategy(
         # 如果 predict 意外带了 label 列，这里做兼容
         pred_df.columns = ["datetime", "instrument", "score"] + [f"col_{i}" for i in range(pred_df.shape[1]-3)]
 
+    # [新增] 保存全量测试集预测结果供回测使用
+    pred_path = RESULT_DIR / "full_test_predictions.pkl"
+    pred_df.to_pickle(pred_path)
+    print(f"✅ 全量预测数据已保存至: {pred_path} (用于回测)")
+    
     # ---------- 提取 test 段真实 LABEL (计算 IC) ----------
     print("提取 test 段真实 LABEL...")
     try:
