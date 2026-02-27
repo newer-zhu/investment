@@ -275,23 +275,12 @@ def load_filter_lists(in_stock):
     # 向上突破A股
     stock_list = load_up_trend_stocks()
 
-    # 停牌股
-    logger.debug("加载停牌股列表...")
-    try:
-        suspension_codes = set(ak.news_trade_notify_suspend_baidu(today_str_YYYYMMDD)['股票代码'].astype(str))
-        logger.debug(f"加载停牌股完成，共 {len(suspension_codes)} 只")
-    except Exception as e:
-        logger.warning(f"加载停牌股失败: {e}")
-        suspension_codes = set()
-
     # 排除 创业板(300/301)、科创板(688/689)、新三板(8开头)
     mask = ~stock_list['code'].str.startswith(('300', '301', '688', '689', '8'))
     stock_list = stock_list[mask]
 
     # 黑名单集合
-    excluded_codes = (
-        suspension_codes
-        | set(map(str, HALF_YEAR_HIGH_SET))
+    excluded_codes = (set(map(str, HALF_YEAR_HIGH_SET))
         | set(map(str, ljqd_blacklist))
     )
     stock_list = stock_list[~stock_list['code'].isin(excluded_codes)]
@@ -548,6 +537,76 @@ def calculate_technical_score(symbol: str, start_date: str, end_date: str, adjus
         score += 18
 
     return float(min(100.0, max(0.0, score)))
+
+def load_latest_fundamental(csv_file: str) -> Dict[str, Any]:
+    """
+    从单个 tushare express CSV 中读取最新一期财务数据
+    """
+    csv_file = Path(csv_file)
+    if not csv_file.exists():
+        raise FileNotFoundError(csv_file)
+
+    # 从文件名拿 code，如 601006.SH.csv -> 601006.SH
+    code = csv_file.stem
+
+    df = pd.read_csv(csv_file)
+
+    if df.empty:
+        return {}
+
+    # 保证时间字段可排序
+    if "ann_date" in df.columns:
+        df["ann_date"] = pd.to_datetime(df["ann_date"], errors="coerce")
+    if "end_date" in df.columns:
+        df["end_date"] = pd.to_datetime(df["end_date"], errors="coerce")
+
+    # 取最新一行（优先 ann_date，其次 end_date）
+    sort_cols = [c for c in ["ann_date", "end_date"] if c in df.columns]
+    latest = df.sort_values(sort_cols).iloc[-1]
+
+    # ======================
+    # 可直接从 CSV 取得的
+    # ======================
+    net_profit = parse_number(safe_get(latest, "n_income"))
+    roe = parse_number(safe_get(latest, "diluted_roe"))
+
+    # yoy_net_profit 是“去年同期净利润”，不是增长率
+    yoy_np = safe_get(latest, "yoy_net_profit")
+    if yoy_np and yoy_np != 0:
+        net_profit_growth = (
+            net_profit - yoy_np
+        ) / abs(yoy_np)
+    else:
+        net_profit_growth = None
+
+    # ======================
+    # 本 CSV 没有的，先占位
+    # ======================
+    gross_margin = None
+    revenue_growth = None
+    debt_ratio = None
+    current_ratio = None
+
+    # ======================
+    # 行情估值（来自 QUOTE_DICT）
+    # ======================
+    row = QUOTE_DICT.get(code)
+    pe_ratio = row.get("市盈率-动态", 0) if row else 0
+    pb_ratio = row.get("市净率", 0) if row else 0
+
+    data_out: Dict[str, Any] = {
+        "net_profit": net_profit,
+        "roe": roe,
+        "gross_margin": gross_margin,
+        "net_profit_growth": net_profit_growth,
+        "revenue_growth": revenue_growth,
+        "debt_ratio": debt_ratio,
+        "current_ratio": current_ratio,
+        "pe_ratio": pe_ratio,
+        "pb_ratio": pb_ratio,
+    }
+
+    return data_out
 
 def get_fundamental_data(code: str) -> Dict[str, Any]:
     """获取基本面数据，返回详细指标字典，带CSV缓存（每月自动刷新）"""

@@ -206,8 +206,8 @@ def run_short_term_strategy(
 
 if __name__ == "__main__":
     run_short_term_strategy(
-        pool_date="2026-02-10", 
-        hold_days=2, 
+        pool_date="2026-02-26", 
+        hold_days=3, 
         bias_limit=0.10, 
         topk=10
     )
