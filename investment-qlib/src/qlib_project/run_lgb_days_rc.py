@@ -16,8 +16,6 @@ from utils.model_params_adjust import get_model_params
 from constants import FILTERED_POOL, DATA_PATH
 from utils.util import load_stock_pool
 
-CSI300_PATH = "csi1000"
-
 # ================== 1. 特征提取与精炼工具 ==================
 def get_refined_feature_config(model, dataset, top_k=50):
     importance = model.model.feature_importance(importance_type='gain')
@@ -82,7 +80,6 @@ def run_short_term_strategy(
     qlib.init(provider_uri=str(DATA_PATH), region=REG_CN)
     target_dt = pd.Timestamp(pool_date)
     instruments = load_stock_pool(FILTERED_POOL)
-    # instruments = CSI300_PATH
 
     valid_start = pd.Timestamp(test_start) - pd.Timedelta(days=90) 
     valid_start_str = valid_start.strftime('%Y-%m-%d')
@@ -129,7 +126,7 @@ def run_short_term_strategy(
         # 如果 predict 意外带了 label 列，这里做兼容
         pred_df.columns = ["datetime", "instrument", "score"] + [f"col_{i}" for i in range(pred_df.shape[1]-3)]
 
-    # [新增] 保存全量测试集预测结果供回测使用
+    # [新增] 保存全量测试集预测结果供回测使用 
     pred_path = RESULT_DIR / "full_test_predictions.pkl"
     pred_df.to_pickle(pred_path)
     print(f"✅ 全量预测数据已保存至: {pred_path} (用于回测)")
@@ -206,8 +203,8 @@ def run_short_term_strategy(
 
 if __name__ == "__main__":
     run_short_term_strategy(
-        pool_date="2026-02-26", 
-        hold_days=3, 
+        pool_date="2026-04-22", 
+        hold_days=2, 
         bias_limit=0.10, 
-        topk=10
+        topk=8
     )

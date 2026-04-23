@@ -1,10 +1,20 @@
+import sys
+from pathlib import Path
 import qlib
 from qlib.data import D
 import pandas as pd
-from pathlib import Path
 from datetime import datetime
 from dateutil.relativedelta import relativedelta
-from constants import DATA_PATH
+BASE_DIR = Path(__file__).resolve().parent
+PROJECT_ROOT = BASE_DIR.parent
+SRC_ROOT = PROJECT_ROOT.parent
+for path in (str(BASE_DIR), str(PROJECT_ROOT), str(SRC_ROOT)):
+    if path not in sys.path:
+        sys.path.insert(0, path)
+try:
+    from constants import DATA_PATH
+except ImportError:
+    from qlib_project.constants import DATA_PATH
 
 OUTPUT_PATH = DATA_PATH / "instruments" / "my_filtered_pool.txt"
 

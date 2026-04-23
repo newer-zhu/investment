@@ -6,7 +6,16 @@ from qlib.data import D
 import pandas as pd
 from typing import List, Dict
 from dateutil.relativedelta import relativedelta
-from constants import DATA_PATH, FINANCE_PATH, TECH_KEYWORDS
+BASE_DIR = Path(__file__).resolve().parent
+PROJECT_ROOT = BASE_DIR.parent
+SRC_ROOT = PROJECT_ROOT.parent
+for path in (str(BASE_DIR), str(PROJECT_ROOT), str(SRC_ROOT)):
+    if path not in sys.path:
+        sys.path.insert(0, path)
+try:
+    from constants import DATA_PATH, FINANCE_PATH, TECH_KEYWORDS
+except ImportError:
+    from qlib_project.constants import DATA_PATH, FINANCE_PATH, TECH_KEYWORDS
 # 导入你的行业工具
 from utils.filter_stocks import get_industry_from_cache
 from typing import Iterable, List
@@ -183,238 +192,6 @@ def filter_by_price(
         return codes
     
 
-def filter_stocks_by_finance(
-    codes: List[str],
-    start_time: str,
-    end_time: str,
-    # 基础阈值设置
-    or_yoy_min: float = 0.0,
-    debt_to_assets_max: float = 85.0,
-    current_ratio_min: float = 0.8,
-    # 新增：最小现金流规模（用于替代市值筛选，单位：元）
-    # 假设 1000万 是一个极小公司的门槛
-    min_fcff_abs: float = 2_000_000.0 
-) -> List[str]:
-    """
-    独立财务精筛：利用多维财务指标过滤“虚假繁荣”的小盘僵尸股
-    """
-    logger.info(f"开始深度财务过滤，初始股票数: {len(codes)}")
-
-    qlib.init(provider_uri=str(FINANCE_PATH))
-
-    # 1. 充分利用你 CSV 中的所有列
-    fields = [
-        "$roe", "$roe_dt", "$roa", "$roic", 
-        "$grossprofit_margin", "$netprofit_margin", 
-        "$or_yoy", "$netprofit_yoy", "$roe_yoy",
-        "$debt_to_assets", "$current_ratio", "$quick_ratio",
-        "$interestdebt", "$ocf_yoy", "$fcff", "$fcfe"
-    ]
-
-    df = D.features(
-        instruments=codes,
-        fields=fields,
-        start_time=start_time,
-        end_time=end_time,
-    )
-
-    if df is None or df.empty:
-        return codes
-
-    # 映射列名
-    df.columns = [
-        "roe", "roe_dt", "roa", "roic", 
-        "gpm", "npm", 
-        "or_yoy", "netprofit_yoy", "roe_yoy",
-        "debt_to_assets", "current_ratio", "quick_ratio",
-        "interestdebt", "ocf_yoy", "fcff", "fcfe"
-    ]
-
-    passed_codes = []
-    
-    for code, df_code in df.groupby(level="instrument"):
-        df_code = df_code.droplevel("instrument")
-        df_valid = df_code.dropna(how="all")
-
-        if df_valid.empty:
-            # 这里的策略：如果没有财务数据，说明可能是新股或数据缺失，通常选择不放行以规避织布机
-            continue
-
-        latest = df_valid.iloc[-1]
-        industry = get_industry_by_code(qlib_to_tushare(code))
-        
-        # 判断是否为科技/成长型行业
-        is_tech = is_industry(industry, ["科技", "半导体", "互联网",
-                                         "新能源", "软件", "芯片", "AI",
-                                         "通信", "电子", "计算机", "汽车"])
-
-# ==========================================
-        # 核心过滤逻辑 1：规模底线（防止完全没流动性）
-        # ==========================================
-        # 短线只需要避开“三无”微型票
-        if not pd.isna(latest["fcff"]) and abs(latest["fcff"]) < min_fcff_abs:
-            if not pd.isna(latest["interestdebt"]) and latest["interestdebt"] < 5_000_000:
-                continue # 既没钱也没债，这种票多半是僵尸股
-
-        # ==========================================
-        # 核心过滤逻辑 2：【重点】短线科技/成长股逻辑
-        # ==========================================
-        if is_tech:
-            # 1. 营收增长是短线灵魂 (放宽对利润的要求，宁要规模不要微利)
-            # 只要营收增长 > 15%，ROE 是负的也能接受
-            if latest["or_yoy"] < 15.0 and latest["roe"] < 3.0:
-                failed = True
-            
-            # 2. 拒绝“低端组装” (即使是科技，毛利低于12%也难有爆发力)
-            if not pd.isna(latest["gpm"]) and latest["gpm"] < 12.0:
-                failed = True
-            
-            # 3. 动态趋势：如果营收在加速 (or_yoy > roe_yoy)，说明在抢市场，优先保留
-            if latest["or_yoy"] > 30.0:
-                failed = False # 营收暴力增长，豁免其他财务瑕疵
-
-        # ==========================================
-        # 核心过滤逻辑 3：传统股逻辑 (依然保持稳健，防止短线踩坑)
-        # ==========================================
-        else:
-            if latest["roe"] < 7.0: # 稍微下调一点，从10%降到7%
-                failed = True
-            if not pd.isna(latest["or_yoy"]) and latest["or_yoy"] < -10:
-                failed = True
-
-        # ==========================================
-        # 核心过滤逻辑 4：安全性兜底 (短线策略只需看爆雷风险)
-        # ==========================================
-        # 负债率：除非极高(>85%)，否则不轻易杀掉高杠杆扩张的科技股
-        if not pd.isna(latest["debt_to_assets"]) and latest["debt_to_assets"] > debt_to_assets_max:
-            failed = True
-
-        # 剔除北交所 (短线如果不想玩织布机，这一行必须留着)
-        if code.startswith("BJ"):
-             # 北交所必须是顶尖成长才看，否则流动性不支持短线
-            if latest["or_yoy"] < 50.0: 
-                failed = True
-
-        if not failed:
-            passed_codes.append(code)
-
-    logger.info(f"短线精筛完成 | 留存: {len(passed_codes)} | 过滤比例降低，攻击性提升")
-    return passed_codes
-
-
-def filter_stocks_by_finance_tech_short(
-    codes: List[str],
-    start_time: str,
-    end_time: str
-) -> List[str]:
-    """
-    科技短线专用财务过滤 (V3.0 宽松排雷版)
-    原则：除非确定是雷，否则不轻易过滤；利用额外字段对研发、商誉、资金链进行兜底。
-    """
-    logger.info(f"科技短线财务过滤开始 | 初始股票数: {len(codes)}")
-
-    qlib.init(provider_uri=str(FINANCE_PATH))
-
-    # Qlib 基础字段
-    fields = [
-        "$roe", "$grossprofit_margin", "$or_yoy", 
-        "$debt_to_assets", "$quick_ratio", "$ocf_yoy"
-    ]
-
-    df = D.features(instruments=codes, fields=fields, start_time=start_time, end_time=end_time)
-    if df is None or df.empty: return codes
-
-    df.columns = ["roe", "gpm", "or_yoy", "debt_to_assets", "quick_ratio", "ocf_yoy"]
-    passed = []
-
-    for code, df_code in df.groupby(level="instrument"):
-        df_code = df_code.droplevel("instrument")
-        df_valid = df_code.dropna(how="all")
-
-        # 1. 基础判断：完全没数据的（如新股）直接放行，短线不看过去，看未来
-        if df_valid.empty:
-            passed.append(code)
-            continue
-
-        latest = df_valid.iloc[-1]
-        prev = df_valid.iloc[-2] if len(df_valid) >= 2 else latest
-        
-        # 2. 从 CSV 提取最新原始数据（解决 NaN 问题）
-        # 这里调用之前定义的 get_latest_financial_row 方法
-        extra = get_latest_financial_row(code)
-
-        # 行业判断
-        industry = get_industry_by_code(qlib_to_tushare(code))
-        if not is_industry(industry, tuple(TECH_KEYWORDS)):
-            continue
-
-        failed = False
-
-        # ==========================================
-        # 🟢 核心排雷 1：财务欺诈与回款风险 (利用额外字段)
-        # ==========================================
-        # 营收含金量：销售商品收到的现金 / 营业收入
-        # 如果这个比例极低 (<0.5)，说明营收很可能是凑的或者是纯打欠条
-        revenue = extra.get('revenue', latest.get('revenue', 0))
-        c_sale = extra.get('c_fr_sale_sg', 0)
-        if revenue > 0 and c_sale > 0:
-            if (c_sale / revenue) < 0.5:
-                failed = True
-
-        # ==========================================
-        # 🟢 核心排雷 2：商誉与资产虚高 (利用额外字段)
-        # ==========================================
-        # 科技股最怕年报商誉减值“大洗澡”。如果商誉占总资产 > 40%，短线风险极大
-        total_assets = extra.get('total_assets', 0)
-        goodwill = extra.get('goodwill', 0)
-        if total_assets > 0 and goodwill > 0:
-            if (goodwill / total_assets) > 0.4:
-                failed = True
-
-        # ==========================================
-        # 🟢 核心排雷 3：伪科技识别 (研发强度)
-        # ==========================================
-        # 如果研发投入 rd_exp 明确存在且极低 (<2%)，则认为不是真科技。
-        # 注意：如果数据缺失则放行（宽松原则）
-        rd_exp = extra.get('rd_exp', 0)
-        if revenue > 0 and rd_exp > 0:
-            if (rd_exp / revenue) < 0.02:
-                failed = True
-
-        # ==========================================
-        # 🟢 核心排雷 4：生存底线 (债务与流动性)
-        # ==========================================
-        # 负债率：放宽到 90% (科技股允许高杠杆抢市场)
-        if not pd.isna(latest["debt_to_assets"]) and latest["debt_to_assets"] > 90:
-            failed = True
-
-        # 现金流枯竭：账面现金 money_cap 几乎为 0，且负债极高
-        money_cap = extra.get('money_cap', 0)
-        if money_cap is not None and money_cap < 1_000_000: # 现金不足100万
-            if latest["debt_to_assets"] > 80:
-                failed = True
-
-        # ==========================================
-        # 🟢 核心排雷 5：趋势性塌陷
-        # ==========================================
-        # 只有在营收和盈利同时出现“断崖式”下跌且无好转迹象时才过滤
-        if (not pd.isna(latest["or_yoy"]) and latest["or_yoy"] < -50 and 
-            not pd.isna(latest["roe"]) and latest["roe"] < -20):
-            failed = True
-
-        # ==========================================
-        # 🟢 宽松补偿：如果营收暴力增长，豁免以上部分财务瑕疵
-        # ==========================================
-        if not pd.isna(latest["or_yoy"]) and latest["or_yoy"] > 50:
-            failed = False 
-
-        if not failed:
-            passed.append(code)
-
-    logger.info(f"科技短线排雷完成 | 入选: {len(passed)} | 过滤比例: {(1 - len(passed)/len(codes))*100:.1f}%")
-    return passed
-
-
 def filter_short_term_stocks(
     codes: List[str],
     start_time: str,
@@ -497,6 +274,118 @@ def filter_short_term_stocks(
     logger.info(f"短线筛选完成 | 留存: {len(passed_codes)} | 过滤比例降低")
     return passed_codes
 
+def filter_stocks_by_finance_tech_short(
+    codes: List[str],
+    start_time: str,
+    end_time: str
+) -> List[str]:
+    """
+    科技短线专用财务过滤 (V4.0 纯 Qlib 极速排雷版)
+    原则：全量使用 Qlib 已有特征 (彻底移除外部慢速 CSV 查询)，
+          引入速动比率、扣非净利、净债务和自由现金流进行多维交叉验证。
+    """
+    logger.info(f"科技短线财务过滤开始 | 初始股票数: {len(codes)}")
+
+    # 1. 为股票代码加上 -fi 后缀
+    codes_fi = [f"{code}-fi" for code in codes]
+
+    safe_start_time = (pd.to_datetime(end_time) - pd.Timedelta(days=180)).strftime('%Y-%m-%d')
+    query_start = min(pd.to_datetime(start_time), pd.to_datetime(safe_start_time)).strftime('%Y-%m-%d')
+
+    # 3. 充分利用你 CSV 里的金矿字段
+    fields = [
+        "$roe", "$grossprofit_margin", "$or_yoy", 
+        "$debt_to_assets", "$quick_ratio", "$current_ratio", 
+        "$dt_netprofit_yoy",  # 扣非净利同比 (排雷神器)
+        "$netprofit_yoy",     # 归母净利同比
+        "$netdebt",           # 净债务 (单位: 元)
+        "$fcff"               # 企业自由现金流 (单位: 元)
+    ]
+
+    df = D.features(
+        instruments=codes_fi, 
+        fields=fields, 
+        start_time=query_start, 
+        end_time=end_time
+    )
+    
+    if df is None or df.empty: 
+        logger.warning("未获取到任何科技财务数据，直接返回原始列表")
+        return codes
+
+    # 重命名列以方便调用
+    df.columns = [
+        "roe", "gpm", "or_yoy", "debt_to_assets", "quick_ratio", "current_ratio",
+        "dt_netprofit_yoy", "netprofit_yoy", "netdebt", "fcff"
+    ]
+    passed = []
+
+    for code_fi, df_code in df.groupby(level="instrument"):
+        original_code = code_fi.replace("-fi", "")
+        df_code = df_code.droplevel("instrument")
+        
+        # 前向填充，解决发布日外全 NaN 问题
+        df_valid = df_code.ffill().dropna(how="all")
+
+        # 没数据的（新股/退市等）直接放行
+        if df_valid.empty:
+            passed.append(original_code)
+            continue
+
+        latest = df_valid.iloc[-1]
+
+        # 行业判断 (保留你的原逻辑)
+        industry = get_industry_by_code(qlib_to_tushare(original_code))
+        if not is_industry(industry, tuple(TECH_KEYWORDS)):
+            continue
+
+        failed = False
+
+        # ==========================================
+        # 🟢 核心排雷 1：债务与流动性枯竭 (替代原 money_cap 逻辑)
+        # ==========================================
+        # 你的 CSV 中 debt_to_assets 是百分比 (如 77.68)
+        if not pd.isna(latest["debt_to_assets"]) and latest["debt_to_assets"] > 90:
+            failed = True
+            
+        # 交叉验证流动性：如果速动比率小于 0.5 (短期还债能力极弱)，且净债务大于 0
+        if not pd.isna(latest["quick_ratio"]) and latest["quick_ratio"] < 0.5:
+            if not pd.isna(latest["netdebt"]) and latest["netdebt"] > 0:
+                failed = True
+
+        # ==========================================
+        # 🟢 核心排雷 2：主业极度恶化 (替代原商誉/欺诈逻辑)
+        # ==========================================
+        # 如果营收暴跌超过 30%，且“扣非净利润”暴跌超过 50%，说明主业已经崩盘
+        if (not pd.isna(latest["or_yoy"]) and latest["or_yoy"] < -30 and 
+            not pd.isna(latest["dt_netprofit_yoy"]) and latest["dt_netprofit_yoy"] < -50):
+            failed = True
+
+        # ==========================================
+        # 🟢 核心排雷 3：失血严重 (利用自由现金流绝对值)
+        # ==========================================
+        # fcff 是绝对值（元）。如果单季/年自由现金流流失超过 2亿 (-200_000_000) 且高负债
+        if not pd.isna(latest["fcff"]) and latest["fcff"] < -200_000_000:
+            if not pd.isna(latest["debt_to_assets"]) and latest["debt_to_assets"] > 70:
+                failed = True
+
+        # ==========================================
+        # 🟢 宽松补偿：暴力成长股的豁免金牌
+        # ==========================================
+        # 科技股看重增速：只要营收增速 > 50%，或者扣非净利增速 > 100%，豁免流动性瑕疵
+        if not pd.isna(latest["or_yoy"]) and latest["or_yoy"] > 50:
+            failed = False 
+        if not pd.isna(latest["dt_netprofit_yoy"]) and latest["dt_netprofit_yoy"] > 100:
+            failed = False
+
+        if not failed:
+            passed.append(original_code)
+
+    filter_ratio = (1 - len(passed) / len(codes)) * 100 if len(codes) > 0 else 0.0
+    logger.info(f"科技短线排雷完成 | 入选: {len(passed)} | 过滤比例: {filter_ratio:.1f}%")
+    
+    return passed
+
 def main():
     # 1. 初始化 Qlib
     qlib.init(provider_uri=str(DATA_PATH))
@@ -525,16 +414,6 @@ def main():
     print(f"价格过滤后数量: {len(codes)}")
     
     # (4) 财务指标过滤
-    # codes = filter_stocks_by_finance(
-    #     codes,
-    #     start_time=(today - relativedelta(months=6)).strftime('%Y-%m-%d'),
-    #     end_time=end_dt,
-    #     # or_yoy_min=5.0,
-    #     # current_ratio_min=0.9,
-    #     # debt_to_assets_max=80.0
-    #     # TODO: 其他可调参数  
-    # )
-    
     codes = filter_stocks_by_finance_tech_short(
         codes,
         start_time=(today - relativedelta(months=6)).strftime('%Y-%m-%d'),

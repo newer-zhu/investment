@@ -1,3 +1,5 @@
+import sys
+from pathlib import Path
 import pandas as pd
 import qlib
 from qlib.data import D
@@ -6,11 +8,16 @@ from qlib.contrib.strategy import TopkDropoutStrategy
 from qlib.backtest import backtest, executor
 # [修复2] 风险分析工具在 qlib.contrib.evaluate 下
 from qlib.contrib.evaluate import risk_analysis
-from pathlib import Path
 import matplotlib.pyplot as plt
 from qlib.backtest.decision import OrderDir, TradeDecisionWO, OrderHelper
 # 引用你的配置
-from constants import DATA_PATH
+BASE_DIR = Path(__file__).resolve().parent
+if str(BASE_DIR) not in sys.path:
+    sys.path.insert(0, str(BASE_DIR))
+try:
+    from constants import DATA_PATH
+except ImportError:
+    from qlib_project.constants import DATA_PATH
 from qlib.config import REG_CN
 
 # ================= 1. 自定义风控策略类 (保持不变) =================
@@ -363,7 +370,7 @@ if __name__ == "__main__":
         run_backtest_analysis(
             pred_path=PRED_FILE,
             start_date="2025-10-30", 
-            end_date="2026-02-01",   
+            end_date="2026-04-01",   
             topk=10,
             bias_limit=0.10
         )

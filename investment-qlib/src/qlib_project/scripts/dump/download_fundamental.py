@@ -63,6 +63,9 @@ def download_one(ts_code: str) -> pd.DataFrame | None:
     df["ann_date"] = df["ann_date"].dt.strftime("%Y-%m-%d")
     df["end_date"] = df["end_date"].dt.strftime("%Y-%m-%d")
 
+    # 重命名 ann_date 为 tradedate
+    df = df.rename(columns={"ann_date": "tradedate"})
+
     return df
 
 
@@ -78,7 +81,7 @@ print(f"Total stocks: {len(ts_codes)}")
 for ts_code in tqdm(ts_codes):
     try:
         qlib_code = tushare_to_qlib(ts_code)
-        out_file = OUT_DIR / f"{qlib_code}.csv"
+        out_file = OUT_DIR / f"{qlib_code}-fi.csv"
 
         df_new = download_one(ts_code)
         if df_new is None or df_new.empty:
@@ -87,21 +90,21 @@ for ts_code in tqdm(ts_codes):
         df_new["symbol"] = qlib_code
         if out_file.exists():
             df_old = pd.read_csv(out_file)
-            df_old["ann_date"] = pd.to_datetime(df_old["ann_date"])
+            df_old["tradedate"] = pd.to_datetime(df_old["tradedate"])
             df_old["end_date"] = pd.to_datetime(df_old["end_date"])
 
             df_all = pd.concat([df_old, df_new], ignore_index=True)
 
             # 🔑 核心：基于财报事实去重
             df_all = df_all.drop_duplicates(
-                subset=["symbol", "ann_date", "end_date"],
+                subset=["symbol", "tradedate", "end_date"],
                 keep="last",
             )
         else:
             df_all = df_new
 
         df_all = df_all.sort_values(
-            by=["ann_date", "end_date"],
+            by=["tradedate", "end_date"],
             ascending=[True, True])
         df_all.to_csv(out_file, index=False)
 

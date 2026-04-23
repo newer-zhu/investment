@@ -122,3 +122,113 @@ def get_model_params(hold_days: int):
     print(f"🚀 科技短线版启动 (Hold: {hold_days}d): LR={c['lr']}, Depth={c['depth']}, MinData={dynamic_min_data}")
     
     return params
+
+def get_model_params_for_trash(hold_days: int):
+    """
+    【A股妖股/散户票暴力博弈版】
+    目标：抛弃平稳性，去捕捉那些稀缺的、极端的涨停/连板收益。
+    改动：移除异常值压制，加深树结构，拥抱高波动！
+    """
+
+    params = {
+        "objective": "regression",     # 放弃 Huber！改回标准的 regression(MSE)，让模型去追逐那些产生极端暴利的样本
+        "metric": "rmse",
+        "n_jobs": -1,
+        "verbosity": -1,
+        "early_stopping_rounds": 50,   # 妖股噪音大，缩短早停轮数，见好就收防止过度拟合白马股
+        "extra_trees": True,
+    }
+
+    # 2. 周期配置表 (针对妖股极端短线重写)
+    configs = {
+        # 1-2天持仓：妖股博弈往往就是今买明卖/后卖，需要更深的树挖掘极其苛刻的量价条件
+        1: {"est": 800,  "lr": 0.08,  "l1": 0.1, "l2": 0.5, "depth": 6}, # depth提高到6，刻画更复杂的逻辑
+        2: {"est": 1000, "lr": 0.06,  "l1": 0.2, "l2": 1.0, "depth": 6}, 
+        3: {"est": 1200, "lr": 0.05,  "l1": 0.3, "l2": 1.0, "depth": 5},
+        4: {"est": 1400, "lr": 0.04,  "l1": 0.4, "l2": 1.5, "depth": 5},
+        5: {"est": 1500, "lr": 0.03,  "l1": 0.5, "l2": 2.0, "depth": 4},
+    }
+    
+    c = configs.get(hold_days, configs[2])
+
+    # 3. 动态计算
+    dynamic_num_leaves = int((2 ** c["depth"]) * 0.85) # 稍微放开一点叶子数
+    
+    # 【核心】妖股样本极度稀少（比如“连续两日放量+烂板”这种形态），min_data必须调低！
+    dynamic_min_data = int(25 - hold_days * 3) 
+    dynamic_min_data = max(10, min(40, dynamic_min_data)) # 最低降到 10，允许极小众策略分支存活
+
+    # 4. 参数注入
+    params.update({
+        "n_estimators": c["est"],
+        "learning_rate": c["lr"],
+        "max_depth": c["depth"],
+        "lambda_l1": c["l1"],
+        "lambda_l2": c["l2"],
+        "num_leaves": dynamic_num_leaves,
+        "min_data_in_leaf": dynamic_min_data,
+        "feature_fraction": 0.85,     # 提高到0.85，妖股博弈需要同时看到价格、成交量、振幅的多维共振
+        "bagging_fraction": 0.80,
+        "bagging_freq": 1,
+    })
+
+    print(f"🚀 妖股暴力博弈版启动 (Hold: {hold_days}d): 拥抱MSE, Depth={c['depth']}, MinData={dynamic_min_data}")
+    
+    return params
+
+def get_model_params_csi300(hold_days: int):
+    """
+    【沪深300稳健版】
+    目标：捕捉大盘蓝筹股的趋势性机会
+    改动：增强模型泛化能力，针对低波动、高容量样本进行结构化调优
+    """
+
+    params = {
+        "objective": "huber",          # 依然推荐 Huber，处理指数成份股偶尔的极端异动
+        "alpha": 0.9,                  # 提高 alpha，对异常值更不敏感，追求大趋势的平均回归
+        "metric": "huber",
+        "n_jobs": -1,
+        "verbosity": -1,
+        "early_stopping_rounds": 120,  # 沪深300噪音相对小，早停轮次放宽，允许模型更充分学习趋势
+        "extra_trees": False,          # 大票逻辑较清晰，不一定需要极端的随机性
+    }
+
+    # 2. 周期配置表 (针对沪深300重载)
+    # 大票持仓通常略长，学习率调低，树深度增加以捕捉多因素博弈
+    configs = {
+        # 沪深300短线波动小，需要更低的学习率和更浅的深度防止捕捉到纯随机噪音
+        1: {"est": 800,  "lr": 0.03,  "l1": 1.5, "l2": 2.0, "depth": 4},
+        2: {"est": 1000, "lr": 0.02,  "l1": 1.2, "l2": 1.5, "depth": 4}, 
+        3: {"est": 1200, "lr": 0.015, "l1": 1.0, "l2": 1.5, "depth": 5},
+        4: {"est": 1300, "lr": 0.01,  "l1": 0.8, "l2": 1.2, "depth": 5},
+        5: {"est": 1500, "lr": 0.01,  "l1": 0.5, "l2": 1.0, "depth": 6},
+    }
+    
+    c = configs.get(hold_days, configs[3])
+
+    # 3. 动态计算
+    # 沪深300样本量虽然固定，但单标的厚度大，可以适当增加叶子数
+    dynamic_num_leaves = int((2 ** c["depth"]) * 0.7)
+    
+    # 大票池子样本量极多，必须大幅提高 min_data_in_leaf，防止模型学到某几只个股的特异性
+    # 沪深300过滤掉个股噪音至少需要 100-200 个样本支撑一个叶子
+    dynamic_min_data = int(100 + hold_days * 20) 
+    dynamic_min_data = max(80, min(250, dynamic_min_data))
+
+    # 4. 参数注入
+    params.update({
+        "n_estimators": c["est"],
+        "learning_rate": c["lr"],
+        "max_depth": c["depth"],
+        "lambda_l1": c["l1"],
+        "lambda_l2": c["l2"],
+        "num_leaves": dynamic_num_leaves,
+        "min_data_in_leaf": dynamic_min_data,
+        "feature_fraction": 0.6,       # 降低特征采样，大票特征相关性高，减少冗余
+        "bagging_fraction": 0.85,      # 提高数据采样，利用沪深300样本充足的优势增加稳定性
+        "bagging_freq": 5,             # 降低采样频率，进一步平滑模型
+    })
+
+    print(f"🏛️ 沪深300稳健版启动 (Hold: {hold_days}d): LR={c['lr']}, Depth={c['depth']}, MinData={dynamic_min_data}")
+    
+    return params

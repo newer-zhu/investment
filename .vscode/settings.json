@@ -1,0 +1,5 @@
+{
+    "python.analysis.extraPaths": [
+        "./investment-qlib/src/qlib_project"
+    ]
+}
