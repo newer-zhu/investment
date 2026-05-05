@@ -186,8 +186,14 @@ def send_email(subject: str, body: str, to_email: str,
         message.attach(MIMEText(body, subtype, 'utf-8'))
         
         # 连接 SMTP
-        server = smtplib.SMTP(smtp_server, smtp_port)
-        server.starttls()  # 安全传输
+        if smtp_port == 465:
+            # SSL 连接（QQ邮箱等）
+            server = smtplib.SMTP_SSL(smtp_server, smtp_port)
+        else:
+            # TLS 连接（Gmail等）
+            server = smtplib.SMTP(smtp_server, smtp_port)
+            server.starttls()  # 安全传输
+        
         server.login(from_email, from_password)
         
         # 发送邮件
