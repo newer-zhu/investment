@@ -1,5 +1,5 @@
 bash daily_update.sh &&
-bash dump_qlib_bin.sh 
+bash dump_qlib_bin.sh / --finance
 
 bash update_qlib_bin.sh 
 

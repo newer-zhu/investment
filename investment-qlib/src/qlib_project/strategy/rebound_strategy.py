@@ -92,15 +92,24 @@ def train_weekly(train_end_date: str, stock_pool: list, data_path: str, hold_day
     print(f"\n================ 开始执行每周模型训练 ({train_end_date}) ================")
     qlib.init(provider_uri=data_path, region=REG_CN)
     start_train = "2018-01-01"
-    test_start = (pd.Timestamp(train_end_date) - pd.Timedelta(days=180)).strftime('%Y-%m-%d')
-    valid_start = (pd.Timestamp(test_start) - pd.Timedelta(days=180)).strftime('%Y-%m-%d')
+    
+    # 实盘建议只留最近 30-60 天作为验证集，让模型“记忆”更贴近当前的行情
+    valid_start = (pd.Timestamp(train_end_date) - pd.Timedelta(days=60)).strftime('%Y-%m-%d')
+    
+    # 在实盘训练中，test 的 segment 其实不参与训练，设为 train_end_date 即可
+    # 真正的预测是在训练完后调用 model.predict(ds_v1)
+    segments = {
+        "train": (start_train, valid_start),
+        "valid": (valid_start, train_end_date),
+        "test": (train_end_date, train_end_date) 
+    }
     stock_in = load_stock_pool(stock_pool)
 
     # 阶段 1：全量特征训练
     print("🚀 [阶段 1/3]：扫描全量特征（寻找反弹信号共振点）...")
     ds_v1 = DatasetH(
         handler=get_rebound_handler(hold_days)(instruments=stock_in, start_time=start_train, end_time=train_end_date),
-        segments={"train": (start_train, valid_start), "valid": (valid_start, test_start), "test": (test_start, train_end_date)}
+        segments=segments
     )
     model_v1 = LGBModel(**get_rebound_model_params(hold_days))
     model_v1.fit(ds_v1)
@@ -113,7 +122,7 @@ def train_weekly(train_end_date: str, stock_pool: list, data_path: str, hold_day
     print("🚀 [阶段 2/3]：精炼特征训练（锁定高胜率组合）...")
     ds_v2 = DatasetH(
         handler=get_rebound_handler(hold_days, refined_fields, refined_names)(instruments=stock_in, start_time=start_train, end_time=train_end_date),
-        segments={"train": (start_train, valid_start), "valid": (valid_start, test_start), "test": (test_start, train_end_date)}
+        segments=segments
     )
     model_v2 = LGBModel(**get_rebound_model_params(hold_days))
     model_v2.fit(ds_v2)
@@ -121,18 +130,11 @@ def train_weekly(train_end_date: str, stock_pool: list, data_path: str, hold_day
     # ---------- 预测与 IC 计算 ----------
     print("生成预测分数...")
     pred_df = model_v2.predict(ds_v2, segment="test")
-    
-    # [核心修复1] 强制将可能出现的 Series 转回 DataFrame，否则 reset_index 后无法指定 columns
     if isinstance(pred_df, pd.Series):
         pred_df = pred_df.to_frame(name="score")
 
     pred_df = pred_df.reset_index()
-    # 确保列名一致性
-    if pred_df.shape[1] == 3:
-        pred_df.columns = ["datetime", "instrument", "score"]
-    else:
-        # 如果 predict 意外带了 label 列，这里做兼容
-        pred_df.columns = ["datetime", "instrument", "score"] + [f"col_{i}" for i in range(pred_df.shape[1]-3)]
+    pred_df.columns = ["datetime", "instrument", "score"] + [f"col_{i}" for i in range(pred_df.shape[1] - 3)]
 
     # [新增] 保存全量测试集预测结果供回测使用 
     RESULT_DIR = PROJECT_ROOT / "data" / "short_term_predictions"
