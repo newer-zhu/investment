@@ -54,9 +54,9 @@ def get_rebound_handler(hold_days: int, refined_fields=None, refined_names=None)
         def get_feature_config(self):
             # 显式注入：乖离率、量比、振幅
             extra_fields = [
-                "$close / Mean($close, 5) - 1", 
-                "$close / Mean($close, 20) - 1",
-                "$amount / Mean($amount, 5)", 
+                "$close / Mean($close, 5) - 1",          # bias_5d
+                "$close / Mean($close, 20) - 1",         # bias_20d
+                "$amount / Mean($amount, 5)",            # vol_ratio
                 "($high - $low) / $close"
             ]
             extra_names = ["bias_5d", "bias_20d", "vol_ratio", "amp_1d"]
@@ -81,191 +81,6 @@ def refine_features(model, dataset, top_k=60):
     df = pd.DataFrame({'name': names, 'field': fields, 'imp': importance}).sort_values('imp', ascending=False)
     return df.head(top_k)['field'].tolist(), df.head(top_k)['name'].tolist()
 
-# ================== 5. 生成 HTML 报告 ==================
-def generate_rebound_report_htmlb(pool_date: str, result: pd.DataFrame, total_candidates: int) -> str:
-    """
-    生成专业的量化报告 HTML
-    """
-    num_selected = len(result)
-    
-    # 格式化表格
-    df_display = result.reset_index()[['instrument', 'score', 'bias_5d', 'bias_20d', 'vol_ratio', 'amp_1d']].copy()
-    df_display.columns = ['股票代码', '预测得分', '5日乖离率', '20日乖离率', '量比', '振幅']
-    
-    # 格式化数值
-    df_display['预测得分'] = df_display['预测得分'].round(4)
-    df_display['5日乖离率'] = (df_display['5日乖离率'] * 100).round(2).astype(str) + '%'
-    df_display['20日乖离率'] = (df_display['20日乖离率'] * 100).round(2).astype(str) + '%'
-    df_display['量比'] = df_display['量比'].round(2)
-    df_display['振幅'] = (df_display['振幅'] * 100).round(2).astype(str) + '%'
-    
-    table_html = df_display.to_html(index=False, border=0, escape=False)
-    
-    # HTML 模板
-    html = f"""
-    <!DOCTYPE html>
-    <html lang="zh-CN">
-    <head>
-        <meta charset="UTF-8">
-        <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>超跌反弹策略报告</title>
-        <style>
-            body {{
-                font-family: 'Microsoft YaHei', 'PingFang SC', 'Hiragino Sans GB', sans-serif;
-                line-height: 1.6;
-                color: #333;
-                max-width: 800px;
-                margin: 0 auto;
-                padding: 20px;
-                background-color: #f8f9fa;
-            }}
-            .header {{
-                background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-                color: white;
-                padding: 30px;
-                border-radius: 10px;
-                text-align: center;
-                margin-bottom: 30px;
-                box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
-            }}
-            .header h1 {{
-                margin: 0;
-                font-size: 28px;
-                font-weight: 300;
-            }}
-            .header p {{
-                margin: 10px 0 0 0;
-                opacity: 0.9;
-            }}
-            .summary {{
-                background: white;
-                padding: 25px;
-                border-radius: 8px;
-                margin-bottom: 25px;
-                box-shadow: 0 2px 4px rgba(0, 0, 0, 0.05);
-            }}
-            .summary h2 {{
-                color: #2c3e50;
-                border-bottom: 2px solid #3498db;
-                padding-bottom: 10px;
-                margin-top: 0;
-            }}
-            .stats {{
-                display: flex;
-                justify-content: space-around;
-                margin: 20px 0;
-            }}
-            .stat {{
-                text-align: center;
-            }}
-            .stat .number {{
-                font-size: 32px;
-                font-weight: bold;
-                color: #3498db;
-            }}
-            .stat .label {{
-                color: #7f8c8d;
-                font-size: 14px;
-                margin-top: 5px;
-            }}
-            .table-container {{
-                background: white;
-                border-radius: 8px;
-                overflow: hidden;
-                box-shadow: 0 2px 4px rgba(0, 0, 0, 0.05);
-            }}
-            table {{
-                width: 100%;
-                border-collapse: collapse;
-            }}
-            th {{
-                background: #34495e;
-                color: white;
-                padding: 15px 10px;
-                text-align: center;
-                font-weight: 500;
-                font-size: 14px;
-            }}
-            td {{
-                padding: 12px 10px;
-                text-align: center;
-                border-bottom: 1px solid #ecf0f1;
-                font-size: 13px;
-            }}
-            tr:nth-child(even) {{
-                background-color: #f8f9fa;
-            }}
-            tr:hover {{
-                background-color: #e8f4fd;
-            }}
-            .footer {{
-                text-align: center;
-                margin-top: 30px;
-                color: #7f8c8d;
-                font-size: 12px;
-            }}
-            .strategy-info {{
-                background: #ecf0f1;
-                padding: 15px;
-                border-radius: 6px;
-                margin-bottom: 20px;
-            }}
-            .strategy-info h3 {{
-                margin-top: 0;
-                color: #2c3e50;
-            }}
-        </style>
-    </head>
-    <body>
-        <div class="header">
-            <h1>🚀 超跌反弹策略报告</h1>
-            <p>报告日期：{pool_date} | 生成时间：{pd.Timestamp.now().strftime('%Y-%m-%d %H:%M:%S')}</p>
-        </div>
-        
-        <div class="summary">
-            <h2>📊 策略执行概况</h2>
-            <div class="stats">
-                <div class="stat">
-                    <div class="number">{total_candidates}</div>
-                    <div class="label">候选股票数</div>
-                </div>
-                <div class="stat">
-                    <div class="number">{num_selected}</div>
-                    <div class="label">入选股票数</div>
-                </div>
-                <div class="stat">
-                    <div class="number">{(num_selected/total_candidates*100):.1f}%</div>
-                    <div class="label">入选比例</div>
-                </div>
-            </div>
-            
-            <div class="strategy-info">
-                <h3>🎯 策略逻辑说明</h3>
-                <p>基于 LightGBM 模型预测未来2日最高价相对当前收盘的收益，筛选出具备超跌反弹潜力的股票。</p>
-                <ul>
-                    <li>✅ 5日乖离率 < 0：股价位于均线下方</li>
-                    <li>✅ 量比 < 1.1：缩量表明抛压衰竭</li>
-                    <li>✅ 20日乖离率 > -15%：中期趋势未完全崩坏</li>
-                    <li>✅ 振幅 > 1.5%：保持基本活跃度</li>
-                </ul>
-            </div>
-        </div>
-        
-        <div class="table-container">
-            <table>
-                {table_html}
-            </table>
-        </div>
-        
-        <div class="footer">
-            <p>⚠️ 投资有风险，入市需谨慎。本报告仅供参考，不构成投资建议。</p>
-            <p>Generated by Qlib Quant Strategy Engine</p>
-        </div>
-    </body>
-    </html>
-    """
-    return html
-
 # ================== 4. 主策略函数 ==================
 def run_rebound_strategy(
     pool_date: str,
@@ -279,12 +94,47 @@ def run_rebound_strategy(
     start_train = "2018-01-01"
     test_start = "2025-10-01"
     valid_start = (pd.Timestamp(test_start) - pd.Timedelta(days=90)).strftime('%Y-%m-%d')
-    instruments = load_stock_pool(stock_pool)
+    stock_in = load_stock_pool(stock_pool)
+    # ================== 市场环境过滤 ==================
+    print("🌍 正在判断市场环境...")
+
+    market_df = D.features(
+        instruments=["SH000300"],  # 沪深300
+        fields=["$close", "Mean($close, 20)"],
+        start_time=pool_date,
+        end_time=pool_date
+    )
+
+    if market_df.empty:
+        print("❌ 无法获取市场数据，跳过交易")
+        return
+
+    market_df = market_df.reset_index()
+    close = market_df.iloc[0]["$close"]
+    ma20 = market_df.iloc[0]["Mean($close, 20)"]
     
-    # --- B. 阶段 1：全特征初步训练 ---
+    breadth_df = D.features(
+    instruments=stock_in,
+    fields=["$close", "Ref($close, 1)"],
+    start_time=pool_date,
+    end_time=pool_date
+    ).reset_index()
+    breadth = (breadth_df["$close"] > breadth_df["Ref($close, 1)"]).mean()
+
+    print(f"📊 市场状态: close={close:.2f}, MA20={ma20:.2f}")
+
+    # 🔥 核心判断
+    if close < ma20 or breadth < 0.4:
+        print("⚠️ 当前市场弱势（跌破MA20），停止开仓")
+        return
+    else:
+        print("✅ 市场环境健康，允许执行反弹策略")
+    
+
+    #阶段 1：全特征初步训练 ---
     print("🚀 阶段 1：扫描全量特征（寻找反弹信号共振点）...")
     ds_v1 = DatasetH(
-        handler=get_rebound_handler(hold_days)(instruments=instruments, start_time=start_train, end_time=pool_date),
+        handler=get_rebound_handler(hold_days)(instruments=stock_in, start_time=start_train, end_time=pool_date),
         segments={"train": (start_train, valid_start), "valid": (valid_start, test_start), "test": (test_start, pool_date)}
     )
     model_v1 = LGBModel(**get_rebound_model_params(hold_days))
@@ -297,7 +147,7 @@ def run_rebound_strategy(
     # --- C. 阶段 2：精炼特征二次拟合 ---
     print("🚀 阶段 2：精炼特征训练（锁定高胜率组合）...")
     ds_v2 = DatasetH(
-        handler=get_rebound_handler(hold_days, refined_fields, refined_names)(instruments=instruments, start_time=start_train, end_time=pool_date),
+        handler=get_rebound_handler(hold_days, refined_fields, refined_names)(instruments=stock_in, start_time=start_train, end_time=pool_date),
         segments={"train": (start_train, valid_start), "valid": (valid_start, test_start), "test": (test_start, pool_date)}
     )
     model_v2 = LGBModel(**get_rebound_model_params(hold_days))
@@ -326,7 +176,7 @@ def run_rebound_strategy(
         "$amount / Mean($amount, 5)", 
         "($high - $low) / $close"
     ]
-    risk_df_raw = D.features(instruments, risk_fields, start_time=pool_date, end_time=pool_date)
+    risk_df_raw = D.features(stock_in, risk_fields, start_time=pool_date, end_time=pool_date)
     
     if risk_df_raw.empty:
         print(f"❌ 警告: 无法获取 {pool_date} 的行情风控数据。")
@@ -343,16 +193,23 @@ def run_rebound_strategy(
         risk_reset.set_index('instrument')[feat_cols], how='inner'
     )
     
-    # 重命名方便过滤逻辑阅读
-    final_table.columns = ['score', 'bias_5d', 'bias_20d', 'vol_ratio', 'amp_1d']
+    final_table.columns = [
+        'score', 
+        'bias_5d', 
+        'bias_20d', 
+        'vol_ratio', 
+        'amp_1d'
+    ]
 
     # --- E. 核心风控逻辑：寻找跌到位后的缩量点 ---
     mask = (
-        (final_table['bias_5d'] < -0.05) &         # 状态：在均线下方
-        (final_table['vol_ratio'] < 1.1) &     # 状态：缩量，说明抛压衰竭
-        (final_table['bias_20d'] > -0.15) &    # 状态：中期趋势未崩坏（防A字杀）
-        (final_table['amp_1d'] > 0.015)        # 状态：保持基本活跃度
+        (final_table['bias_5d'] < -0.04) &      # 放宽
+        (final_table['vol_ratio'] < 1.2) &      # 放宽
+        (final_table['bias_20d'] > -0.2) &      # 放宽
+        (final_table['amp_1d'] > 0.01) 
     )
+    
+    print(final_table[['bias_5d', 'vol_ratio', 'bias_20d', 'amp_1d']].describe())
     
     candidates = final_table[mask].sort_values("score", ascending=False)
     result = candidates.head(topk)
@@ -410,7 +267,7 @@ def run_rebound_strategy(
 if __name__ == "__main__":
     # 运行策略
     result = run_rebound_strategy(
-        pool_date="2026-04-30",
+        pool_date="2026-05-06",
         stock_pool=TRASH_POOL,
         data_path=DATA_PATH,
         hold_days=2,

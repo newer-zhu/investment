@@ -1,3 +1,7 @@
+import sys
+import os
+sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
+
 import time
 from pathlib import Path
 import pandas as pd
@@ -5,7 +9,7 @@ from tqdm import tqdm
 import tushare as ts
 from utils.util import tushare_to_qlib 
 
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
+PROJECT_ROOT = Path(__file__).resolve().parents[4]
 SOURCE_PATH = PROJECT_ROOT / "data" / "cache" / "stock_basic.csv"
 
 # ======================
@@ -28,19 +32,25 @@ OUT_DIR.mkdir(parents=True, exist_ok=True)
 # 3. 核心字段（raw layer）
 # ======================
 CORE_COLS = [
-    "ts_code", "ann_date", "end_date",
-
+    "ann_date", "end_date",
     "roe", "roe_dt", "roa", "roic",
     "grossprofit_margin", "netprofit_margin", "profit_to_gr",
-
     "or_yoy", "tr_yoy",
     "netprofit_yoy", "dt_netprofit_yoy", "roe_yoy",
-
     "debt_to_assets", "current_ratio", "quick_ratio",
     "interestdebt", "netdebt",
+    "ocf_yoy", "fcff", "fcfe",
+]
 
-    "ocf_to_or", "ocf_to_profit", "ocf_yoy",
-    "fcff", "fcfe",
+# ======================
+# 3.5. 期望的输出列顺序
+# ======================
+DESIRED_COLUMNS = [
+    "tradedate", "symbol", "end_date", "roe", "roe_dt", "roa", "roic",
+    "grossprofit_margin", "netprofit_margin", "profit_to_gr", "or_yoy", 
+    "tr_yoy", "netprofit_yoy", "dt_netprofit_yoy", "roe_yoy", 
+    "debt_to_assets", "current_ratio", "quick_ratio", "interestdebt", 
+    "netdebt", "ocf_yoy", "fcff", "fcfe"
 ]
 
 # ======================
@@ -88,6 +98,9 @@ for ts_code in tqdm(ts_codes):
             continue
 
         df_new["symbol"] = qlib_code
+        
+        # Ensure columns are in the correct order
+        df_new = df_new[DESIRED_COLUMNS] if all(col in df_new.columns for col in DESIRED_COLUMNS) else df_new
         if out_file.exists():
             df_old = pd.read_csv(out_file)
             df_old["tradedate"] = pd.to_datetime(df_old["tradedate"])
@@ -106,6 +119,10 @@ for ts_code in tqdm(ts_codes):
         df_all = df_all.sort_values(
             by=["tradedate", "end_date"],
             ascending=[True, True])
+        
+        # Ensure final output has correct column order
+        df_all = df_all[DESIRED_COLUMNS] if all(col in df_all.columns for col in DESIRED_COLUMNS) else df_all
+        
         df_all.to_csv(out_file, index=False)
 
         time.sleep(0.12)  # 稍微保守点
