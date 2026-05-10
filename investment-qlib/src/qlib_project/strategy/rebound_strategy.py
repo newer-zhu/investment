@@ -33,21 +33,30 @@ FEATURE_FILE = MODEL_DIR / "rebound_refined_features.json"
 
 # ================== 1. 模型参数配置 ==================
 def get_rebound_model_params(hold_days: int):
-    """针对超跌反弹的轻量化拟合参数"""
+    """针对超跌反弹的实盘鲁棒型参数"""
     return {
         "objective": "regression",
         "metric": "rmse",
         "n_jobs": -1,
         "verbosity": -1,
-        "early_stopping_rounds": 50,
-        "extra_trees": True,
+        "early_stopping_rounds": 100, # 给模型更多观察期
+        "extra_trees": True,          # 继续保持，这有助于抗过拟合
         "n_estimators": 1000,
-        "learning_rate": 0.05,
-        "max_depth": 6,
-        "lambda_l1": 0.1,
-        "lambda_l2": 0.2,
-        "num_leaves": 40,
+        
+        # --- 核心调整项 ---
+        "learning_rate": 0.01,        # 显著调低，慢工出细活
+        "max_depth": 3,               # 强制弱模型！超跌反弹的核心逻辑通常很简单
+        "num_leaves": 8,              # 配合 depth=3，限制叶子节点数
+        
+        "lambda_l1": 1.5,             # 显著提高 L1，剔除无效特征
+        "lambda_l2": 2.0,             # 显著提高 L2，平滑系数
+        
+        "bagging_fraction": 0.8,      # 每次迭代只用 80% 的数据，增加随机性
+        "feature_fraction": 0.8,      # 每次迭代只用 80% 的特征，防止单一特征绑架模型
+        "bagging_freq": 5,
+        "min_data_in_leaf": 50,       # 确保每个叶子节点有足够样本，防止学到孤例
     }
+
 
 # ================== 2. 反弹专用数据处理器 ==================
 def get_rebound_handler(hold_days: int, refined_fields=None, refined_names=None):
@@ -126,15 +135,21 @@ def train_weekly(train_end_date: str, stock_pool: list, data_path: str, hold_day
     )
     model_v2 = LGBModel(**get_rebound_model_params(hold_days))
     model_v2.fit(ds_v2)
-
+        
     # ---------- 预测与 IC 计算 ----------
-    print("生成预测分数...")
     pred_df = model_v2.predict(ds_v2, segment="test")
+    
+    # [核心修复1] 强制将可能出现的 Series 转回 DataFrame，否则 reset_index 后无法指定 columns
     if isinstance(pred_df, pd.Series):
         pred_df = pred_df.to_frame(name="score")
 
     pred_df = pred_df.reset_index()
-    pred_df.columns = ["datetime", "instrument", "score"] + [f"col_{i}" for i in range(pred_df.shape[1] - 3)]
+    # 确保列名一致性
+    if pred_df.shape[1] == 3:
+        pred_df.columns = ["datetime", "instrument", "score"]
+    else:
+        # 如果 predict 意外带了 label 列，这里做兼容
+        pred_df.columns = ["datetime", "instrument", "score"] + [f"col_{i}" for i in range(pred_df.shape[1]-3)]
 
     # [新增] 保存全量测试集预测结果供回测使用 
     RESULT_DIR = PROJECT_ROOT / "data" / "short_term_predictions"
@@ -153,6 +168,7 @@ def train_weekly(train_end_date: str, stock_pool: list, data_path: str, hold_day
         label_df.rename(columns={label_col_name: "LABEL0"}, inplace=True)
 
         # 合并 score + label
+        # 即使是 2-08 执行，merge(inner) 会自动保留 test 段中有标签的历史日期，计算出 IC
         pred_with_label = pd.merge(
             pred_df[["datetime", "instrument", "score"]],
             label_df[["datetime", "instrument", "LABEL0"]],
