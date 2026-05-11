@@ -13,7 +13,7 @@ from qlib.contrib.data.handler import Alpha158
 from qlib.contrib.model.gbdt import LGBModel
 from qlib.data import D
 
-# 路径配置
+# ================== 基础路径配置 ==================
 BASE_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = BASE_DIR.parent
 SRC_ROOT = PROJECT_ROOT.parent
@@ -25,41 +25,84 @@ from qlib_project.constants import TRASH_POOL, DATA_PATH
 from qlib_project.utils.util import load_stock_pool, send_email, load_config_from_ini
 from qlib_project.utils.email_report_utils import generate_rebound_report_html
 
-# ================== 0. 存储路径配置 ==================
+# 存储路径
 MODEL_DIR = PROJECT_ROOT / "data" / "models" / "rebound"
 MODEL_DIR.mkdir(parents=True, exist_ok=True)
 MODEL_FILE = MODEL_DIR / "lgb_rebound_model.pkl"
 FEATURE_FILE = MODEL_DIR / "rebound_refined_features.json"
 
-# ================== 1. 模型参数配置 ==================
-def get_rebound_model_params(hold_days: int):
-    """针对超跌反弹的实盘鲁棒型参数"""
-    return {
-        "objective": "regression",
-        "metric": "rmse",
+# ================== 1. 改进的模型参数配置 ==================
+def get_rebound_model_params(hold_days: int, feature_names: list = None):
+    """
+    针对超跌反弹定制：
+    1. huber 损失：对妖股的暴涨暴跌不敏感，只抓普遍规律。
+    2. monotone_constraints：强制模型理解“跌得多反弹强”。
+    """
+    params = {
+        "objective": "huber",          # 鲁棒回归，抗离群点
+        "hubert_delta": 0.1,
+        "metric": "mae",
         "n_jobs": -1,
         "verbosity": -1,
-        "early_stopping_rounds": 100, # 给模型更多观察期
-        "extra_trees": True,          # 继续保持，这有助于抗过拟合
+        "early_stopping_rounds": 80,
+        "extra_trees": True,
         "n_estimators": 1000,
-        
-        # --- 核心调整项 ---
-        "learning_rate": 0.01,        # 显著调低，慢工出细活
-        "max_depth": 3,               # 强制弱模型！超跌反弹的核心逻辑通常很简单
-        "num_leaves": 8,              # 配合 depth=3，限制叶子节点数
-        
-        "lambda_l1": 1.5,             # 显著提高 L1，剔除无效特征
-        "lambda_l2": 2.0,             # 显著提高 L2，平滑系数
-        
-        "bagging_fraction": 0.8,      # 每次迭代只用 80% 的数据，增加随机性
-        "feature_fraction": 0.8,      # 每次迭代只用 80% 的特征，防止单一特征绑架模型
-        "bagging_freq": 5,
-        "min_data_in_leaf": 50,       # 确保每个叶子节点有足够样本，防止学到孤例
+        "learning_rate": 0.015,        # 慢速学习
+        "max_depth": 3,                # 极浅树，防止背诵行情
+        "num_leaves": 7,
+        "lambda_l1": 2.0,              # 强 L1 正则，筛选特征
+        "lambda_l2": 2.0,
+        "bagging_fraction": 0.7,
+        "feature_fraction": 0.7,
+        "bagging_freq": 1,
+        "min_data_in_leaf": 30,
     }
 
+    # 自动注入单调性约束
+    if feature_names:
+        constraints = []
+        for name in feature_names:
+            if "bias" in name.lower(): 
+                constraints.append(-1) # 乖离率越小(越负)，得分越高
+            elif "vol_ratio" in name.lower() or "amp" in name.lower():
+                constraints.append(1)  # 振幅/量比越大，得分越高
+            else:
+                constraints.append(0)
+        params["monotone_constraints"] = constraints
 
-# ================== 2. 反弹专用数据处理器 ==================
+    return params
+
+
+def signal_ic(score, label):
+    """Compute daily IC and rank IC for signal scores and labels."""
+    df = pd.concat([score.rename("score"), label.rename("label")], axis=1).dropna()
+    if df.empty:
+        return pd.DataFrame({"ic": [], "rank_ic": []})
+
+    if isinstance(df.index, pd.MultiIndex):
+        if "datetime" in df.index.names:
+            group = df.groupby(level="datetime")
+        else:
+            group = df.groupby(level=0)
+    elif "datetime" in df.columns:
+        group = df.groupby("datetime")
+    else:
+        group = [(None, df)]
+
+    ic_list = []
+    rank_ic_list = []
+    for _, sub in group:
+        if len(sub) < 2:
+            ic_list.append(np.nan)
+            rank_ic_list.append(np.nan)
+            continue
+        ic_list.append(sub["score"].corr(sub["label"]))
+        rank_ic_list.append(sub["score"].rank().corr(sub["label"].rank()))
+    return pd.DataFrame({"ic": ic_list, "rank_ic": rank_ic_list})
+
+# ================== 2. 数据处理器 ==================
 def get_rebound_handler(hold_days: int, refined_fields=None, refined_names=None):
+    # 预测目标：未来2日最高价相对于今日收盘的涨幅（捕捉反弹瞬间）
     label_expr = "If(Ref($high, -1) > Ref($high, -2), Ref($high, -1), Ref($high, -2)) / $close - 1"
     
     class ReboundAlpha158(Alpha158):
@@ -67,16 +110,17 @@ def get_rebound_handler(hold_days: int, refined_fields=None, refined_names=None)
             return ([label_expr], ["LABEL_REBOUND"])
             
         def get_feature_config(self):
+            # 基础反弹逻辑因子
             extra_fields = [
-                "$close / Mean($close, 5) - 1",          # bias_5d
-                "$close / Mean($close, 20) - 1",         # bias_20d
-                "$amount / Mean($amount, 5)",            # vol_ratio
+                "$close / Mean($close, 5) - 1", 
+                "$close / Mean($close, 20) - 1", 
+                "$amount / Mean($amount, 5)", 
                 "($high - $low) / $close"
             ]
             extra_names = ["bias_5d", "bias_20d", "vol_ratio", "amp_1d"]
 
             if refined_fields and refined_names:
-                return refined_fields + extra_fields, refined_names + extra_names
+                return refined_fields, refined_names
             
             conf = super().get_feature_config()
             conf[0].extend(extra_fields)
@@ -84,246 +128,180 @@ def get_rebound_handler(hold_days: int, refined_fields=None, refined_names=None)
             return conf
 
         def get_learn_processors(self):
-            return [{"class": "ConfigSectionProcessor", "kwargs": {"fillna_label": True, "clip_label_outlier": False}}]
+            return [
+                {"class": "ConfigSectionProcessor", "kwargs": {"fillna_label": True, "clip_label_outlier": True}},
+                {"class": "CSZScoreNorm", "kwargs": {"fields_group": "feature"}} # 横向标准化
+            ]
             
     return ReboundAlpha158
 
-# ================== 3. 特征重要性提取 ==================
-def refine_features(model, dataset, top_k=60):
-    importance = model.model.feature_importance(importance_type='gain')
-    fields, names = dataset.handler.get_feature_config()
+# ================== 3. 特征精炼 (杜绝泄漏版) ==================
+def refine_features_no_leakage(handler_obj, segments, top_k=50):
+    """
+    为了防止泄漏，我们新创建一个临时的简单模型，只在 train segment 上训练。
+    """
+    ds = DatasetH(handler=handler_obj, segments=segments)
+    # 快速训练一个评估模型
+    tmp_model = LGBModel(n_estimators=200, learning_rate=0.1, max_depth=3, verbosity=-1)
+    tmp_model.fit(ds)
+    
+    importance = tmp_model.model.feature_importance(importance_type='gain')
+    fields, names = handler_obj.get_feature_config()
+    
     df = pd.DataFrame({'name': names, 'field': fields, 'imp': importance}).sort_values('imp', ascending=False)
-    return df.head(top_k)['field'].tolist(), df.head(top_k)['name'].tolist()
+    
+    # 强制保留核心反弹因子
+    core_names = ["bias_5d", "bias_20d", "vol_ratio", "amp_1d"]
+    refined_df = df[~df['name'].isin(core_names)].head(top_k - len(core_names))
+    final_df = pd.concat([df[df['name'].isin(core_names)], refined_df])
+    
+    return final_df['field'].tolist(), final_df['name'].tolist()
 
-
-# ================== 4. 任务A: 周末离线训练 (每周执行一次) ==================
+# ================== 4. 每周离线训练任务 ==================
 def train_weekly(train_end_date: str, stock_pool: list, data_path: str, hold_days: int = 2):
-    print(f"\n================ 开始执行每周模型训练 ({train_end_date}) ================")
+    print(f"\n================ 启动防御型模型训练 ({train_end_date}) ================")
     qlib.init(provider_uri=data_path, region=REG_CN)
-    start_train = "2018-01-01"
     
-    # 实盘建议只留最近 30-60 天作为验证集，让模型“记忆”更贴近当前的行情
-    valid_start = (pd.Timestamp(train_end_date) - pd.Timedelta(days=60)).strftime('%Y-%m-%d')
+    # 应对 Regime Shift: 仅使用 2021 年以后的数据
+    start_train = "2021-01-01" 
+    valid_start = (pd.Timestamp(train_end_date) - pd.Timedelta(days=120)).strftime('%Y-%m-%d')
     
-    # 在实盘训练中，test 的 segment 其实不参与训练，设为 train_end_date 即可
-    # 真正的预测是在训练完后调用 model.predict(ds_v1)
     segments = {
-        "train": (start_train, valid_start),
-        "valid": (valid_start, train_end_date),
+        "train": (start_train, (pd.Timestamp(valid_start) - pd.Timedelta(days=1)).strftime('%Y-%m-%d')),
+        "valid": (valid_start, (pd.Timestamp(train_end_date) - pd.Timedelta(days=1)).strftime('%Y-%m-%d')),
         "test": (train_end_date, train_end_date) 
     }
     stock_in = load_stock_pool(stock_pool)
 
-    # 阶段 1：全量特征训练
-    print("🚀 [阶段 1/3]：扫描全量特征（寻找反弹信号共振点）...")
-    ds_v1 = DatasetH(
-        handler=get_rebound_handler(hold_days)(instruments=stock_in, start_time=start_train, end_time=train_end_date),
-        segments=segments
+    # --- 阶段 1：特征精炼（防泄漏模式） ---
+    print("🚀 [阶段 1]：特征初筛（仅基于历史 Train 段）...")
+    base_handler = get_rebound_handler(hold_days)(instruments=stock_in, start_time=start_train, end_time=train_end_date)
+    refined_fields, refined_names = refine_features_no_leakage(base_handler, segments, top_k=45)
+    
+    # --- 阶段 2：最终模型训练 ---
+    print(f"🚀 [阶段 2]：精炼拟合（保留 {len(refined_names)} 个核心特征）...")
+    final_handler = get_rebound_handler(hold_days, refined_fields, refined_names)(
+        instruments=stock_in, start_time=start_train, end_time=train_end_date
     )
-    model_v1 = LGBModel(**get_rebound_model_params(hold_days))
-    model_v1.fit(ds_v1)
+    ds_final = DatasetH(handler=final_handler, segments=segments)
     
-    refined_fields, refined_names = refine_features(model_v1, ds_v1, top_k=60)
-    del ds_v1, model_v1
-    gc.collect()
-
-    # 阶段 2：精炼特征二次拟合
-    print("🚀 [阶段 2/3]：精炼特征训练（锁定高胜率组合）...")
-    ds_v2 = DatasetH(
-        handler=get_rebound_handler(hold_days, refined_fields, refined_names)(instruments=stock_in, start_time=start_train, end_time=train_end_date),
-        segments=segments
-    )
-    model_v2 = LGBModel(**get_rebound_model_params(hold_days))
-    model_v2.fit(ds_v2)
-        
-    # ---------- 预测与 IC 计算 ----------
-    pred_df = model_v2.predict(ds_v2, segment="test")
+    # 注入特征名以启用单调约束
+    model_params = get_rebound_model_params(hold_days, refined_names)
+    final_model = LGBModel(**model_params)
+    final_model.fit(ds_final)
     
-    # [核心修复1] 强制将可能出现的 Series 转回 DataFrame，否则 reset_index 后无法指定 columns
-    if isinstance(pred_df, pd.Series):
-        pred_df = pred_df.to_frame(name="score")
-
-    pred_df = pred_df.reset_index()
-    # 确保列名一致性
-    if pred_df.shape[1] == 3:
-        pred_df.columns = ["datetime", "instrument", "score"]
-    else:
-        # 如果 predict 意外带了 label 列，这里做兼容
-        pred_df.columns = ["datetime", "instrument", "score"] + [f"col_{i}" for i in range(pred_df.shape[1]-3)]
-
-    # [新增] 保存全量测试集预测结果供回测使用 
-    RESULT_DIR = PROJECT_ROOT / "data" / "short_term_predictions"
-    RESULT_DIR.mkdir(parents=True, exist_ok=True)
-    pred_path = RESULT_DIR / "full_test_predictions.pkl"
-    pred_df.to_pickle(pred_path)
-    print(f"✅ 全量预测数据已保存至: {pred_path} (用于回测)")
+    # --- 阶段 3：效能评估 (验证集 IC) ---
+    # valid_pred = final_model.predict(ds_final, segment="valid")
+    # valid_label = ds_final.prepare(segments="valid", col_set="label")
+    # if isinstance(valid_pred, pd.Series): valid_pred = valid_pred.to_frame("score")
     
-    # ---------- 提取 test 段真实 LABEL (计算 IC) ----------
-    print("提取 test 段真实 LABEL...")
-    try:
-        label_df = ds_v2.prepare(segments="test", col_set="label")
-        label_df = label_df.reset_index()
-        # 兼容处理列名，确保第二列之后是标签
-        label_col_name = label_df.columns[-1]
-        label_df.rename(columns={label_col_name: "LABEL0"}, inplace=True)
+    # valid_combined = pd.concat([valid_pred, valid_label], axis=1).dropna()
+    # if not valid_combined.empty:
 
-        # 合并 score + label
-        # 即使是 2-08 执行，merge(inner) 会自动保留 test 段中有标签的历史日期，计算出 IC
-        pred_with_label = pd.merge(
-            pred_df[["datetime", "instrument", "score"]],
-            label_df[["datetime", "instrument", "LABEL0"]],
-            on=["datetime", "instrument"],
-            how="inner"
-        ).set_index(["datetime", "instrument"])
+    #     ic = signal_ic(valid_combined.iloc[:, 0], valid_combined.iloc[:, 1])
+    #     print(f"📈 验证集 (最近120天) IC: {ic['ic'].mean():.4f}, Rank IC: {ic['rank_ic'].mean():.4f}")
 
-        if not pred_with_label.empty:
-            print(f"✅ 成功合并预测与 LABEL，共 {len(pred_with_label)} 条样本")
-            from ic_eval import calc_ic_rank_ic
-            summary, ic_ts, rank_ic_ts = calc_ic_rank_ic(pred_with_label)
-            print("===== IC / Rank IC 统计 =====")
-            for k, v in summary.items():
-                print(f"{k}: {v:.4f}" if isinstance(v, float) else f"{k}: {v}")
-        else:
-            print("ℹ️ 当前 test 段中尚无已实现的 Label（正常现象：全部为未来日期）")
-
-    except Exception as e:
-        print(f"⚠️ IC / Rank IC 计算跳过 (原因: {repr(e)})")
-        
-    # 阶段 3：持久化保存
-    print("🚀 [阶段 3/3]：保存模型与特征组合...")
-    # 保存特征列表
+    # --- 阶段 4：保存 ---
+    final_model.to_pickle(str(MODEL_FILE))
     with open(FEATURE_FILE, 'w', encoding='utf-8') as f:
         json.dump({"fields": refined_fields, "names": refined_names}, f, ensure_ascii=False)
     
-    # 保存模型 (Qlib 的 LGBModel 支持 pickle)
-    with open(MODEL_FILE, 'wb') as f:
-        pickle.dump(model_v2, f)
-        
-    print(f"✅ 模型训练完成！")
-    print(f"💾 特征路径: {FEATURE_FILE}")
-    print(f"💾 模型路径: {MODEL_FILE}")
+    print(f"✅ 模型训练完成！路径: {MODEL_FILE}")
 
-
-# ================== 5. 任务B: 每日推断 (每日盘后执行) ==================
-def predict_daily(pool_date: str, stock_pool: list, data_path: str, hold_days: int = 2, topk: int = 8):
-    print(f"\n================ 开始执行每日预测 ({pool_date}) ================")
+# ================== 5. 每日推断任务 ==================
+def predict_daily(pool_date: str, stock_pool: list, data_path: str, hold_days: int = 2, topk: int = 6):
+    print(f"\n================ 执行每日阻击预测 ({pool_date}) ================")
     qlib.init(provider_uri=data_path, region=REG_CN)
     stock_in = load_stock_pool(stock_pool)
-
-    # --- A. 市场环境过滤 ---
-    print("🌍 正在判断市场环境...")
-    market_df = D.features(
-        instruments=["SH000300"],  # 沪深300
-        fields=["$close", "Mean($close, 20)"],
-        start_time=pool_date,
-        end_time=pool_date
-    )
-
-    if market_df.empty:
-        print(f"❌ 无法获取 {pool_date} 市场数据，跳过交易")
-        return pd.DataFrame()
-
-    market_df = market_df.reset_index()
-    close = market_df.iloc[0]["$close"]
-    ma20 = market_df.iloc[0]["Mean($close, 20)"]
     
-    breadth_df = D.features(instruments=stock_in, fields=["$close", "Ref($close, 1)"], start_time=pool_date, end_time=pool_date).reset_index()
-    breadth = (breadth_df["$close"] > breadth_df["Ref($close, 1)"]).mean()
+    print(f"DEBUG: 检查股票池样本: {stock_in[:5]}")
+    check_d = D.features(stock_in[:10], ["$close"], start_time=pool_date, end_time=pool_date)
 
-    print(f"📊 市场状态: 沪深300 close={close:.2f}, MA20={ma20:.2f}, 市场广度={breadth:.1%}")
+    if check_d.empty:
+        print("‼️ 结论：你的本地Qlib数据库里没有 " + pool_date + " 的数据，请先同步数据！")
+    
+    # 1. 环境风控：大盘必须企稳，广度必须尚可
+    market_df = D.features(["SH000300"], ["$close", "Mean($close, 20)"], start_time=pool_date, end_time=pool_date)
+    if not market_df.empty:
+        row = market_df.iloc[0]
+        if row["$close"] < row["Mean($close, 20)"]:
+            print("⚠️ 市场处于 MA20 下方，系统性风险高，不建议开仓。")
+            # return pd.DataFrame() # 根据你的风险偏好决定是否强制中断
 
-    if close < ma20 or breadth < 0.4:
-        print("⚠️ 当前市场弱势（跌破MA20 或 广度不佳），停止开仓")
-        return pd.DataFrame()
-    else:
-        print("✅ 市场环境健康，允许执行反弹策略")
-
-    # --- B. 加载模型与特征 ---
-    if not MODEL_FILE.exists() or not FEATURE_FILE.exists():
-        print("❌ 未找到预训练模型或特征文件，请先运行 train_weekly()！")
+    # 2. 加载
+    if not MODEL_FILE.exists():
+        print("❌ 模型文件不存在。")
         return pd.DataFrame()
 
     with open(FEATURE_FILE, 'r', encoding='utf-8') as f:
-        features_dict = json.load(f)
-        refined_fields = features_dict['fields']
-        refined_names = features_dict['names']
-
-    with open(MODEL_FILE, 'rb') as f:
-        model_loaded = pickle.load(f)
-    print("✅ 预训练模型加载成功！")
-
-    # --- C. 构建推断数据集 (为了计算 MA20 等特征，start_time 前推 60 天) ---
-    print("⏱️ 正在构建今日推断特征...")
-    lookback_start = (pd.Timestamp(pool_date) - pd.Timedelta(days=60)).strftime('%Y-%m-%d')
+        feat_conf = json.load(f)
     
-    ds_infer = DatasetH(
-        handler=get_rebound_handler(hold_days, refined_fields, refined_names)(instruments=stock_in, start_time=lookback_start, end_time=pool_date),
-        segments={"test": (pool_date, pool_date)}  # 只对今天进行预测
+    with open(MODEL_FILE, 'rb') as f:
+        model = pickle.load(f)
+
+    # 3. 预测
+    lookback = (pd.Timestamp(pool_date) - pd.Timedelta(days=60)).strftime('%Y-%m-%d')
+    handler = get_rebound_handler(hold_days, feat_conf['fields'], feat_conf['names'])(
+        instruments=stock_in, start_time=lookback, end_time=pool_date
     )
+    ds = DatasetH(handler=handler, segments={"test": (pool_date, pool_date)})
+    
+    pred_df = model.predict(ds, segment="test")
+    if isinstance(pred_df, pd.Series): pred_df = pred_df.to_frame("score")
+    
+    # 强制规范化预测结果的索引
+    scores = pred_df.reset_index()
+    scores = scores[scores['datetime'] == pd.Timestamp(pool_date)].copy()
+    scores['instrument'] = scores['instrument'].astype(str).str.upper().str.strip()
+    scores = scores.set_index('instrument')
 
-    # --- D. 预测结果 ---
-    pred_df = model_loaded.predict(ds_infer, segment="test")
-    if isinstance(pred_df, pd.Series): pred_df = pred_df.to_frame(name="score")
+    print(f"DEBUG: 预测得分表(scores)样本数: {len(scores)}")
 
-    pred_reset = pred_df.reset_index()
-    if len(pred_reset.columns) == 3:
-        pred_reset.columns = ['datetime', 'instrument', 'score']
-    pred_reset['instrument'] = pred_reset['instrument'].astype(str).str.upper().str.strip()
-    today_pred = pred_reset[pred_reset['datetime'] == pd.Timestamp(pool_date)].copy()
-
-    if today_pred.empty:
-        print(f"❌ 警告: {pool_date} 当天无预测得分。")
-        return pd.DataFrame()
-
-    # --- E. 形态过滤与合并 ---
-    print(f"🛠️ 正在应用【超跌 + 衰竭】形态过滤...")
-    risk_fields = [
-        "$close / Mean($close, 5) - 1", 
-        "$close / Mean($close, 20) - 1", 
-        "$amount / Mean($amount, 5)", 
-        "($high - $low) / $close"
-    ]
+    # --- E. 行情风控数据清洗 ---
+    risk_fields = ["$close/Mean($close,5)-1", "$close/Mean($close,20)-1", "$amount/Mean($amount,5)", "($high-$low)/$close"]
     risk_df_raw = D.features(stock_in, risk_fields, start_time=pool_date, end_time=pool_date)
     
     if risk_df_raw.empty:
-        print(f"❌ 警告: 无法获取 {pool_date} 的行情风控数据。")
+        print(f"❌ 错误: D.features 无法获取字段数据。")
         return pd.DataFrame()
 
-    risk_reset = risk_df_raw.reset_index()
-    risk_reset['instrument'] = risk_reset['instrument'].astype(str).str.upper().str.strip()
-    feat_cols = [c for c in risk_reset.columns if c not in ['datetime', 'instrument']]
-    
-    final_table = today_pred.set_index('instrument')[['score']].join(
-        risk_reset.set_index('instrument')[feat_cols], how='inner'
-    )
-    
-    final_table.columns = ['score', 'bias_5d', 'bias_20d', 'vol_ratio', 'amp_1d']
+    # 重点：使用 xs 提取特定日期的所有股票，此时索引会自动变成 instrument
+    try:
+        # 如果 Qlib 返回的是 (datetime, instrument)
+        risk_data = risk_df_raw.xs(pd.Timestamp(pool_date), level='datetime')
+    except KeyError:
+        # 如果 Qlib 返回的是 (instrument, datetime)
+        risk_data = risk_df_raw.xs(pd.Timestamp(pool_date), level=1)
 
-    mask = (
-        (final_table['bias_5d'] < -0.04) &      
-        (final_table['vol_ratio'] < 1.2) &      
-        (final_table['bias_20d'] > -0.2) &      
-        (final_table['amp_1d'] > 0.01) 
-    )
-    
-    candidates = final_table[mask].sort_values("score", ascending=False)
-    result = candidates.head(topk)
+    # 规范化列名和索引
+    risk_data.columns = ['bias_5d', 'bias_20d', 'vol_ratio', 'amp_1d']
+    risk_data.index = risk_data.index.astype(str).str.upper().str.strip()
 
-    # --- F. 输出与邮件发送 ---
-    print(f"\n✅ {pool_date} 阻击名单 (有效标的: {len(final_table)}, 触发买点: {len(result)}):")
+    print(f"DEBUG: 行情风控表(risk_data)样本数: {len(risk_data)}")
+    if len(risk_data) > 0:
+        print(f"DEBUG: 修正后的 Risk ID 示例: '{risk_data.index[0]}'")
+
+    # --- F. 合并 ---
+    final = scores[['score']].join(risk_data[['bias_5d', 'bias_20d', 'vol_ratio', 'amp_1d']], how='inner')
+    print(f"DEBUG: 参与形态过滤的股票总数 (Join后): {len(final)}")
+    # 过滤条件：5日乖离率够低，且成交量没有异常放大（防止下跌放量承接不住）
+    mask = (final['bias_5d'] < -0.035) & (final['vol_ratio'] < 1.3)
+    result = final[mask].sort_values('score', ascending=False).head(topk)
+
+    print(f"\n✅ {pool_date} 阻击名单 (Join 数: {len(final)}, 选出: {len(result)}):")
     if not result.empty:
         print(result[['score', 'bias_5d', 'vol_ratio']])
-        
-        # 结果存盘
+        # 保存结果
         RESULT_DIR = PROJECT_ROOT / "data" / "rebound_predictions"
         RESULT_DIR.mkdir(parents=True, exist_ok=True)
         result_path = RESULT_DIR / f"rebound_picks_{pool_date}.csv"
         result.to_csv(result_path)
         print(f"💾 结果已保存至: {result_path}")
         
-        # 发送邮件
+        # 发送邮件报告
         try:
-            config_path = PROJECT_ROOT.parent.parent.parent / "config.ini"
+            config_path = PROJECT_ROOT.parent.parent.parent / "config.ini"  # /mnt/f/Code/investment/config.ini
+            print(f"🔍 配置文件路径: {config_path}")
             _email_cfg = load_config_from_ini("email", str(config_path))
             TO_EMAILS = [e.strip() for e in _email_cfg.get("to_emails", "").split(",") if e.strip()] or [_email_cfg.get("to_email", "")]
             FROM_EMAIL = _email_cfg.get("from_email", "")
@@ -331,49 +309,43 @@ def predict_daily(pool_date: str, stock_pool: list, data_path: str, hold_days: i
             SMTP_SERVER = _email_cfg.get("smtp_server", "smtp.qq.com")
             SMTP_PORT = int(_email_cfg.get("smtp_port", "587"))
             
-            html_body = generate_rebound_report_html(pool_date, result, len(final_table))
+            print(f"📧 邮件配置 - 发件人: {FROM_EMAIL}")
+            print(f"📧 邮件配置 - 密码: {FROM_PASSWORD[:4]}****")  # 只显示前4位
+            print(f"📧 邮件配置 - 收件人: {TO_EMAILS}")
+            print(f"📧 邮件配置 - SMTP: {SMTP_SERVER}:{SMTP_PORT}")
+            
+            # 生成 HTML 报告
+            html_body = generate_rebound_report_html(pool_date, result, len(final))
+            
             subject = f"🚀 超跌反弹策略报告 - {pool_date}"
             
             for to_email in TO_EMAILS:
                 send_email(
-                    subject=subject, body=html_body, to_email=to_email,
-                    from_email=FROM_EMAIL, from_password=FROM_PASSWORD,
-                    smtp_server=SMTP_SERVER, smtp_port=SMTP_PORT, content_type="html"
+                    subject=subject,
+                    body=html_body,
+                    to_email=to_email,
+                    from_email=FROM_EMAIL,
+                    from_password=FROM_PASSWORD,
+                    smtp_server=SMTP_SERVER,
+                    smtp_port=SMTP_PORT,
+                    content_type="html"
                 )
             print("📧 邮件报告已发送成功！")
         except Exception as e:
             print(f"❌ 邮件发送失败: {e}")
     else:
-        print("⚠️ 今日无匹配形态的个股，耐心等待市场回调至缩量点。")
+        print("⚠️ 今日无匹配形态的个股，请耐心等待市场回调至缩量点。")
 
     return result
 
-# ================== 6. 运行入口 ==================
 if __name__ == "__main__":
-    # 为了方便测试，你可以通过传入命令行参数 sys.argv 控制执行逻辑
-    # 例如：python rebound_strategy.py --mode=train --date=2026-05-01
-    #       python rebound_strategy.py --mode=predict --date=2026-05-06
-    
     import argparse
-    parser = argparse.ArgumentParser(description="超跌反弹策略：训练与预测分离")
-    parser.add_argument("--mode", type=str, choices=["train", "predict"], default="predict", help="执行模式：train 或 predict")
-    parser.add_argument("--date", type=str, default="2026-05-06", help="目标日期，格式 YYYY-MM-DD")
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--mode", type=str, choices=["train", "predict"], default="predict")
+    parser.add_argument("--date", type=str, default=pd.Timestamp.now().strftime('%Y-%m-%d'))
     args = parser.parse_args()
 
     if args.mode == "train":
-        # 周末运行：执行模型训练与特征降维保存
-        train_weekly(
-            train_end_date=args.date,
-            stock_pool=TRASH_POOL,
-            data_path=DATA_PATH,
-            hold_days=2
-        )
+        train_weekly(args.date, TRASH_POOL, DATA_PATH)
     else:
-        # 工作日运行：仅执行推断逻辑，极大提升运行速度
-        result = predict_daily(
-            pool_date=args.date,
-            stock_pool=TRASH_POOL,
-            data_path=DATA_PATH,
-            hold_days=2,
-            topk=6
-        )
+        predict_daily(args.date, TRASH_POOL, DATA_PATH)
