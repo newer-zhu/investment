@@ -232,11 +232,20 @@ def safe_get(df, field):
     return val
 
 @lru_cache(maxsize=1024)
-def is_industry(industry: str, keywords: list[str]) -> bool:
+def is_industry(
+    industry: str,
+    keywords: tuple[str, ...]
+) -> bool:
+
     if not industry:
         return False
+
     industry = industry.lower()
-    return any(k.lower() in industry for k in keywords)
+
+    return any(
+        k.lower() in industry
+        for k in keywords
+    )
 
 
 def format_symbol(code: str) -> str:

@@ -12,8 +12,9 @@ def generate_rebound_report_html(pool_date: str, result: pd.DataFrame, total_can
     """
     num_selected = len(result)
 
-    # 格式化表格
-    df_display = result.reset_index()[['instrument', 'score', 'bias_5d', 'bias_20d', 'vol_ratio', 'amp_1d']].copy()
+    # 格式化表格 - 添加更多有用的列
+    display_cols = ['instrument', 'score', 'bias_5d', 'bias_20d', 'vol_ratio', 'amp_1d']
+    df_display = result.reset_index()[display_cols].copy()
     df_display.columns = ['股票代码', '预测得分', '5日乖离率', '20日乖离率', '量比', '振幅']
 
     # 格式化数值
@@ -22,6 +23,11 @@ def generate_rebound_report_html(pool_date: str, result: pd.DataFrame, total_can
     df_display['20日乖离率'] = (df_display['20日乖离率'] * 100).round(2).astype(str) + '%'
     df_display['量比'] = df_display['量比'].round(2)
     df_display['振幅'] = (df_display['振幅'] * 100).round(2).astype(str) + '%'
+
+    # 计算统计信息
+    avg_score = result['score'].mean() if not result.empty else 0
+    avg_bias_5d = result['bias_5d'].mean() if not result.empty else 0
+    avg_vol_ratio = result['vol_ratio'].mean() if not result.empty else 0
 
     table_html = df_display.to_html(index=False, border=0, escape=False)
 
@@ -95,32 +101,35 @@ def generate_rebound_report_html(pool_date: str, result: pd.DataFrame, total_can
             .table-container {{
                 background: white;
                 border-radius: 8px;
-                overflow: hidden;
+                overflow-x: auto;
                 box-shadow: 0 2px 4px rgba(0, 0, 0, 0.05);
+                margin-bottom: 20px;
             }}
             table {{
                 width: 100%;
                 border-collapse: collapse;
             }}
             th {{
-                background: #34495e;
+                background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
                 color: white;
-                padding: 15px 10px;
+                padding: 12px 8px;
                 text-align: center;
                 font-weight: 500;
-                font-size: 14px;
+                font-size: 12px;
+                border: 1px solid #ddd;
             }}
             td {{
-                padding: 12px 10px;
+                padding: 10px 8px;
                 text-align: center;
                 border-bottom: 1px solid #ecf0f1;
-                font-size: 13px;
+                font-size: 12px;
             }}
             tr:nth-child(even) {{
                 background-color: #f8f9fa;
             }}
             tr:hover {{
                 background-color: #e8f4fd;
+                transition: background-color 0.2s;
             }}
             .footer {{
                 text-align: center;
@@ -128,15 +137,42 @@ def generate_rebound_report_html(pool_date: str, result: pd.DataFrame, total_can
                 color: #7f8c8d;
                 font-size: 12px;
             }}
-            .strategy-info {{
-                background: #ecf0f1;
+            .performance-metrics {{
+                background: #f8f9fa;
                 padding: 15px;
                 border-radius: 6px;
                 margin-bottom: 20px;
             }}
-            .strategy-info h3 {{
+            .performance-metrics h3 {{
                 margin-top: 0;
                 color: #2c3e50;
+                font-size: 16px;
+            }}
+            .metrics-grid {{
+                display: flex;
+                justify-content: space-between;
+                flex-wrap: wrap;
+                gap: 15px;
+            }}
+            .metric {{
+                display: flex;
+                flex-direction: column;
+                align-items: center;
+                background: white;
+                padding: 10px;
+                border-radius: 4px;
+                box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+                min-width: 120px;
+            }}
+            .metric-label {{
+                font-size: 12px;
+                color: #7f8c8d;
+                margin-bottom: 5px;
+            }}
+            .metric-value {{
+                font-size: 16px;
+                font-weight: bold;
+                color: #3498db;
             }}
         </style>
     </head>
@@ -163,14 +199,32 @@ def generate_rebound_report_html(pool_date: str, result: pd.DataFrame, total_can
                 </div>
             </div>
 
+            <div class="performance-metrics">
+                <h3>📈 入选股票统计</h3>
+                <div class="metrics-grid">
+                    <div class="metric">
+                        <span class="metric-label">平均预测得分:</span>
+                        <span class="metric-value">{avg_score:.4f}</span>
+                    </div>
+                    <div class="metric">
+                        <span class="metric-label">平均5日乖离率:</span>
+                        <span class="metric-value">{avg_bias_5d:.1%}</span>
+                    </div>
+                    <div class="metric">
+                        <span class="metric-label">平均量比:</span>
+                        <span class="metric-value">{avg_vol_ratio:.2f}</span>
+                    </div>
+                </div>
+            </div>
+
             <div class="strategy-info">
                 <h3>🎯 策略逻辑说明</h3>
-                <p>基于 LightGBM 模型预测未来2日最高价相对当前收盘的收益，筛选出具备超跌反弹潜力的股票。</p>
+                <p>基于 LightGBM 模型预测未来<strong>2日</strong>最高价相对当前收盘的收益，筛选出具备超跌反弹潜力的股票。</p>
                 <ul>
-                    <li>✅ 5日乖离率 < 0：股价位于均线下方</li>
-                    <li>✅ 量比 < 1.1：缩量表明抛压衰竭</li>
-                    <li>✅ 20日乖离率 > -15%：中期趋势未完全崩坏</li>
-                    <li>✅ 振幅 > 1.5%：保持基本活跃度</li>
+                    <li>✅ 5日乖离率 < -3.5%：股价位于均线下方，具备反弹基础</li>
+                    <li>✅ 量比 < 1.3：缩量表明抛压衰竭，资金观望</li>
+                    <li>✅ 20日乖离率控制：中期趋势未完全崩坏</li>
+                    <li>✅ 振幅适中：保持基本活跃度和流动性</li>
                 </ul>
             </div>
         </div>
@@ -183,7 +237,7 @@ def generate_rebound_report_html(pool_date: str, result: pd.DataFrame, total_can
 
         <div class="footer">
             <p>⚠️ 投资有风险，入市需谨慎。本报告仅供参考，不构成投资建议。</p>
-            <p>Generated by Qlib Quant Strategy Engine</p>
+            <p>Generated by Qlib Quant Strategy Engine v2.0 | {pd.Timestamp.now().strftime('%Y-%m-%d %H:%M:%S')}</p>
         </div>
     </body>
     </html>

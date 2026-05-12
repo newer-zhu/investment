@@ -103,7 +103,7 @@ def signal_ic(score, label):
 # ================== 2. 数据处理器 ==================
 def get_rebound_handler(hold_days: int, refined_fields=None, refined_names=None):
     # 预测目标：未来2日最高价相对于今日收盘的涨幅（捕捉反弹瞬间）
-    label_expr = "If(Ref($high, -1) > Ref($high, -2), Ref($high, -1), Ref($high, -2)) / $close - 1"
+    label_expr = "If(Ref($high, -1) > Ref($high, -2), Ref($high, -1), Ref($high, -2)) / Ref($open, -1) - 1"
     
     class ReboundAlpha158(Alpha158):
         def get_label_config(self):
@@ -136,13 +136,28 @@ def get_rebound_handler(hold_days: int, refined_fields=None, refined_names=None)
     return ReboundAlpha158
 
 # ================== 3. 特征精炼 (杜绝泄漏版) ==================
+# ================== 3. 特征精炼 (杜绝泄漏修正版) ==================
 def refine_features_no_leakage(handler_obj, segments, top_k=50):
     """
-    为了防止泄漏，我们新创建一个临时的简单模型，只在 train segment 上训练。
+    为了防止泄漏，我们新创建一个临时的简单模型。
+    利用 Qlib 的特性：强制要求 valid 集。我们将 train 的时间段同时赋给 valid，
+    从而在满足底层 API 的同时，彻底隔绝真实的 valid 数据。
     """
-    ds = DatasetH(handler=handler_obj, segments=segments)
-    # 快速训练一个评估模型
-    tmp_model = LGBModel(n_estimators=200, learning_rate=0.1, max_depth=3, verbosity=-1)
+    # 巧妙构造临时 segments：train 和 valid 指向同一个时间段
+    tmp_segments = {
+        "train": segments["train"],
+        "valid": segments["train"]  # 【核心修正】用训练集自己做验证
+    }
+    ds = DatasetH(handler=handler_obj, segments=tmp_segments)
+    
+    # 恢复正常的整数配置（这里的 early_stopping 实际上是在监控 train 的 error，几乎不会提前停止）
+    tmp_model = LGBModel(
+        n_estimators=100, 
+        learning_rate=0.1, 
+        max_depth=3, 
+        early_stopping_rounds=50, # 恢复整数传入
+        verbosity=-1
+    )
     tmp_model.fit(ds)
     
     importance = tmp_model.model.feature_importance(importance_type='gain')
@@ -166,8 +181,9 @@ def train_weekly(train_end_date: str, stock_pool: list, data_path: str, hold_day
     start_train = "2021-01-01" 
     valid_start = (pd.Timestamp(train_end_date) - pd.Timedelta(days=120)).strftime('%Y-%m-%d')
     
+    train_end_date_actual = (pd.Timestamp(valid_start) - pd.Timedelta(days=3)).strftime('%Y-%m-%d')
     segments = {
-        "train": (start_train, (pd.Timestamp(valid_start) - pd.Timedelta(days=1)).strftime('%Y-%m-%d')),
+        "train": (start_train, train_end_date_actual), # 留出至少2天的gap
         "valid": (valid_start, (pd.Timestamp(train_end_date) - pd.Timedelta(days=1)).strftime('%Y-%m-%d')),
         "test": (train_end_date, train_end_date) 
     }
@@ -191,15 +207,15 @@ def train_weekly(train_end_date: str, stock_pool: list, data_path: str, hold_day
     final_model.fit(ds_final)
     
     # --- 阶段 3：效能评估 (验证集 IC) ---
-    # valid_pred = final_model.predict(ds_final, segment="valid")
-    # valid_label = ds_final.prepare(segments="valid", col_set="label")
-    # if isinstance(valid_pred, pd.Series): valid_pred = valid_pred.to_frame("score")
+    valid_pred = final_model.predict(ds_final, segment="valid")
+    valid_label = ds_final.prepare(segments="valid", col_set="label")
+    if isinstance(valid_pred, pd.Series): valid_pred = valid_pred.to_frame("score")
     
-    # valid_combined = pd.concat([valid_pred, valid_label], axis=1).dropna()
-    # if not valid_combined.empty:
+    valid_combined = pd.concat([valid_pred, valid_label], axis=1).dropna()
+    if not valid_combined.empty:
 
-    #     ic = signal_ic(valid_combined.iloc[:, 0], valid_combined.iloc[:, 1])
-    #     print(f"📈 验证集 (最近120天) IC: {ic['ic'].mean():.4f}, Rank IC: {ic['rank_ic'].mean():.4f}")
+        ic = signal_ic(valid_combined.iloc[:, 0], valid_combined.iloc[:, 1])
+        print(f"📈 验证集 (最近120天) IC: {ic['ic'].mean():.4f}, Rank IC: {ic['rank_ic'].mean():.4f}")
 
     # --- 阶段 4：保存 ---
     final_model.to_pickle(str(MODEL_FILE))
@@ -213,12 +229,6 @@ def predict_daily(pool_date: str, stock_pool: list, data_path: str, hold_days: i
     print(f"\n================ 执行每日阻击预测 ({pool_date}) ================")
     qlib.init(provider_uri=data_path, region=REG_CN)
     stock_in = load_stock_pool(stock_pool)
-    
-    print(f"DEBUG: 检查股票池样本: {stock_in[:5]}")
-    check_d = D.features(stock_in[:10], ["$close"], start_time=pool_date, end_time=pool_date)
-
-    if check_d.empty:
-        print("‼️ 结论：你的本地Qlib数据库里没有 " + pool_date + " 的数据，请先同步数据！")
     
     # 1. 环境风控：大盘必须企稳，广度必须尚可
     market_df = D.features(["SH000300"], ["$close", "Mean($close, 20)"], start_time=pool_date, end_time=pool_date)
@@ -310,7 +320,6 @@ def predict_daily(pool_date: str, stock_pool: list, data_path: str, hold_days: i
             SMTP_PORT = int(_email_cfg.get("smtp_port", "587"))
             
             print(f"📧 邮件配置 - 发件人: {FROM_EMAIL}")
-            print(f"📧 邮件配置 - 密码: {FROM_PASSWORD[:4]}****")  # 只显示前4位
             print(f"📧 邮件配置 - 收件人: {TO_EMAILS}")
             print(f"📧 邮件配置 - SMTP: {SMTP_SERVER}:{SMTP_PORT}")
             
