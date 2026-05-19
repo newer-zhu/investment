@@ -174,268 +174,63 @@ def filter_industry_emotion(codes: List[str]):
     return filtered
 
 # ================= 情绪股票池过滤 =================
-def filter_by_price_retail(
-    codes: List[str],
-    min_price=1.5,
-    max_price=60,
-):
-    """
-    宽松情绪池：
-    目标：
-    1. 尽量不漏情绪股
-    2. 给后续 LGB 学习
-    3. 不提前做 alpha
-
-    核心：
-    active OR compressed OR oversold
-    """
-
-    if not codes:
-        return []
-
+def filter_by_price_retail(codes: List[str], min_price=2.0, max_price=50):
+    if not codes: return []
     try:
-
         cal = D.calendar()
-
-        if len(cal) == 0:
-            return codes
-
         last_day = cal[-1]
-
-        # ==========================================================
-        # 特征
-        # ==========================================================
+        
+        # 增加 $cap 字段，用于过滤市值
         fields = [
-
-            # ========= 真实价格 =========
-            "$close / $factor",
-
-            # ========= 20日平均振幅 =========
-            "Mean(($high - $low) / $close, 20)",
-
-            # ========= 成交额 =========
-            "$amount",
-
-            # ========= VWAP偏离 =========
-            "Mean(Abs($close - $vwap) / $vwap, 20)",
-
-            # ========= 20日乖离 =========
-            "($close - Mean($close, 20)) / Mean($close, 20)",
-
-            # ========= 成交额变化 =========
-            "Mean($amount, 5) / Mean($amount, 20)",
-
-            # ========= 波动聚集 =========
-            "Std(($high - $low) / $close, 10)",
-
-            # ========= 连续阴跌 =========
-            "Sum(If($close < Ref($close,1), 1, 0), 10)",
-
-            # ========= 距离20日低点 =========
-            "($close - Min($close,20)) / Min($close,20)"
+            "$close / $factor",                  # real_price
+            "Mean(($high - $low) / $close, 20)", # amp
+            "$amount",                           # amount
+            "($close - Mean($close, 20)) / Mean($close, 20)", # bias_20
+            "Mean($amount, 5) / Mean($amount, 20)",           # amount_ratio
+            "Sum(If($close < Ref($close,1), 1, 0), 10)",      # down_days_10d
+            "($close - Min($close,20)) / Min($close,20)",      # dist_from_low20
         ]
 
-        df = D.features(
-            codes,
-            fields,
-            start_time=last_day,
-            end_time=last_day
+        df = D.features(codes, fields, start_time=last_day, end_time=last_day)
+        if df is None or df.empty: return codes
+        df.columns = ["real_price", "amp", "amount", "bias", "amount_ratio", "down_days", "dist_low"]
+
+        # 1. 基础硬过滤：收紧价格和流动性
+        # 排除全市场成交额后 15% 的冷门股
+        amt_thresh = df["amount"].quantile(0.15)
+        
+        mask_base = (
+            (df["real_price"] > min_price) & 
+            (df["real_price"] < max_price) &
+            (df["amount"] > amt_thresh)
         )
 
-        if df is None or df.empty:
-            return codes
+        # 2. 三大情绪子路径（严苛化）
+        
+        # 路径 A：真正的深跌（20日跌幅超过12%，且离底部很近）
+        cond_oversold = (df["bias"] < -0.12) & (df["dist_low"] < 0.05)
+        
+        # 路径 B：持续阴跌后的波动极度收缩（变盘前夜）
+        cond_compressed = (df["down_days"] >= 8) & (df["amp"] < 0.02)
+        
+        # 路径 C：活跃股放量杀跌（黄金坑机会）
+        cond_active_drop = (df["amp"] > 0.035) & (df["amount_ratio"] > 1.2) & (df["bias"] < -0.05)
 
-        df.columns = [
-            "real_price",
-            "amp",
-            "amount",
-            "vwap_dev",
-            "bias",
-            "amount_ratio",
-            "amp_std_10d",
-            "down_days_10d",
-            "dist_from_low20",
-        ]
+        final_mask = mask_base & (cond_oversold | cond_compressed | cond_active_drop)
 
-        # ==========================================================
-        # 基础过滤
-        # ==========================================================
+        filtered = df[final_mask].index.get_level_values("instrument").unique().tolist()
 
-        # ========= 价格 =========
-        mask_price = (
-            (df["real_price"] > min_price)
-            &
-            (df["real_price"] < max_price)
-        )
-
-        # ========= 流动性 =========
-        # 仅过滤最冷门的 1%
-        amount_threshold = (
-            df["amount"]
-            .quantile(0.01)
-        )
-
-        mask_liquidity = (
-            df["amount"] > amount_threshold
-        )
-
-        # ==========================================================
-        # 情绪行为条件
-        # ==========================================================
-
-        # ========= 当前活跃 =========
-        cond_active = (
-            (df["amp"] > 0.015)
-            &
-            (df["vwap_dev"] > 0.004)
-        )
-
-        # ========= 超跌 =========
-        cond_oversold = (
-            df["bias"] < -0.06
-        )
-
-        # ========= 放量 =========
-        cond_volume_attack = (
-            df["amount_ratio"] > 1.1
-        )
-
-        # ========= 波动压缩 =========
-        cond_compressed = (
-            df["amp_std_10d"] < 0.012
-        )
-
-        # ========= 连续阴跌 =========
-        cond_downtrend = (
-            df["down_days_10d"] >= 6
-        )
-
-        # ========= 接近20日低点 =========
-        cond_near_bottom = (
-            df["dist_from_low20"] < 0.08
-        )
-
-        # ==========================================================
-        # 最终过滤
-        # ==========================================================
-
-        final_mask = (
-            (
-                cond_oversold
-                &
-                cond_near_bottom
-            )
-
-            |
-
-            (
-                cond_downtrend
-                &
-                cond_compressed
-            )
-
-            |
-
-            (
-                cond_active
-                &
-                cond_volume_attack
-            )
-        )
-
-        filtered = (
-            df[final_mask]
-            .index
-            .get_level_values("instrument")
-            .unique()
-            .tolist()
-        )
-
-        # ==========================================================
-        # 自动扩容
-        # ==========================================================
-
-        if len(filtered) < 800:
-
-            print(
-                f"📡 当前股票池仅 "
-                f"{len(filtered)} 只，自动扩容..."
-            )
-
-            loose_mask = (
-
-                mask_price
-
-                &
-
-                (
-                    (df["amp"] > 0.01)
-                    |
-                    (df["bias"] < -0.04)
-                    |
-                    (df["amount_ratio"] > 1.0)
-                    |
-                    (df["amp_std_10d"] < 0.015)
-                )
-            )
-
-            filtered = (
-                df[loose_mask]
-                .index
-                .get_level_values("instrument")
-                .unique()
-                .tolist()
-            )
-
-        # ==========================================================
-        # 输出统计
-        # ==========================================================
-
-        print(
-            f"🔥 情绪池过滤完成: "
-            f"{len(codes)} -> {len(filtered)}"
-        )
-
-        print(
-            f"📊 活跃股数量: "
-            f"{cond_active.sum()}"
-        )
-
-        print(
-            f"📊 超跌股数量: "
-            f"{cond_oversold.sum()}"
-        )
-
-        print(
-            f"📊 放量股数量: "
-            f"{cond_volume_attack.sum()}"
-        )
-
-        print(
-            f"📊 波动压缩股数量: "
-            f"{cond_compressed.sum()}"
-        )
-
-        print(
-            f"📊 阴跌股数量: "
-            f"{cond_downtrend.sum()}"
-        )
-
-        print(
-            f"📊 接近低点股数量: "
-            f"{cond_near_bottom.sum()}"
-        )
+        # 3. 极其克制的自动扩容
+        if len(filtered) < 300:
+            print(f"📡 池子太小 ({len(filtered)})，执行轻度扩容...")
+            # 仅放宽 bias 到 -8%
+            loose_mask = mask_base & ((df["bias"] < -0.08) | (df["down_days"] >= 7))
+            filtered = df[loose_mask].index.get_level_values("instrument").unique().tolist()
 
         return filtered
-
     except Exception as e:
-
-        print(
-            f"❌ filter_by_price_retail 异常: {e}"
-        )
-
+        print(f"❌ 异常: {e}")
         return codes
-
 
 # ================= 主程序 =================
 def main():

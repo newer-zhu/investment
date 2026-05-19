@@ -55,7 +55,7 @@ def get_rebound_model_params(hold_days: int, feature_names: list = None):
         "bagging_fraction": 0.7,
         "feature_fraction": 0.7,
         "bagging_freq": 1,
-        "min_data_in_leaf": 30,
+        "min_data_in_leaf": 15,
     }
 
     # 自动注入单调性约束
@@ -135,8 +135,6 @@ def get_rebound_handler(hold_days: int, refined_fields=None, refined_names=None)
             
     return ReboundAlpha158
 
-# ================== 3. 特征精炼 (杜绝泄漏版) ==================
-# ================== 3. 特征精炼 (杜绝泄漏修正版) ==================
 def refine_features_no_leakage(handler_obj, segments, top_k=50):
     """
     为了防止泄漏，我们新创建一个临时的简单模型。
@@ -173,7 +171,7 @@ def refine_features_no_leakage(handler_obj, segments, top_k=50):
     return final_df['field'].tolist(), final_df['name'].tolist()
 
 # ================== 4. 每周离线训练任务 ==================
-def train_weekly(train_end_date: str, stock_pool: list, data_path: str, hold_days: int = 2):
+def train_weekly(train_end_date: str, stock_pool: list, data_path: str, hold_days: int = 2, test_end_date: str = "2026-03-01"):
     print(f"\n================ 启动防御型模型训练 ({train_end_date}) ================")
     qlib.init(provider_uri=data_path, region=REG_CN)
     
@@ -182,10 +180,12 @@ def train_weekly(train_end_date: str, stock_pool: list, data_path: str, hold_day
     valid_start = (pd.Timestamp(train_end_date) - pd.Timedelta(days=120)).strftime('%Y-%m-%d')
     
     train_end_date_actual = (pd.Timestamp(valid_start) - pd.Timedelta(days=3)).strftime('%Y-%m-%d')
+    
+    # 🛠️【修复点 1】将 test 段的结束时间延伸至回测结束日
     segments = {
-        "train": (start_train, train_end_date_actual), # 留出至少2天的gap
+        "train": (start_train, train_end_date_actual), 
         "valid": (valid_start, (pd.Timestamp(train_end_date) - pd.Timedelta(days=1)).strftime('%Y-%m-%d')),
-        "test": (train_end_date, train_end_date) 
+        "test": (train_end_date, test_end_date) 
     }
     stock_in = load_stock_pool(stock_pool)
 
@@ -196,8 +196,10 @@ def train_weekly(train_end_date: str, stock_pool: list, data_path: str, hold_day
     
     # --- 阶段 2：最终模型训练 ---
     print(f"🚀 [阶段 2]：精炼拟合（保留 {len(refined_names)} 个核心特征）...")
+    
+    # 🛠️【修复点 2】将 final_handler 的 end_time 改为 test_end_date，确保生成回测期特征
     final_handler = get_rebound_handler(hold_days, refined_fields, refined_names)(
-        instruments=stock_in, start_time=start_train, end_time=train_end_date
+        instruments=stock_in, start_time=start_train, end_time=test_end_date
     )
     ds_final = DatasetH(handler=final_handler, segments=segments)
     
@@ -213,16 +215,33 @@ def train_weekly(train_end_date: str, stock_pool: list, data_path: str, hold_day
     
     valid_combined = pd.concat([valid_pred, valid_label], axis=1).dropna()
     if not valid_combined.empty:
-
         ic = signal_ic(valid_combined.iloc[:, 0], valid_combined.iloc[:, 1])
         print(f"📈 验证集 (最近120天) IC: {ic['ic'].mean():.4f}, Rank IC: {ic['rank_ic'].mean():.4f}")
 
-    # --- 阶段 4：保存 ---
+    # --- 阶段 4：生成并保存【回测所需的测试集信号】 ---
+    print(f"🚀 [阶段 4]：正在生成回测区间的预测信号 ({train_end_date} ~ {test_end_date})...")
+    
+    # 🛠️【修复点 3】预测 test 字段，这才是你回测要用的信号
+    test_pred = final_model.predict(ds_final, segment="test")
+    
+    # 统一格式为 DataFrame
+    if isinstance(test_pred, pd.Series): 
+        test_pred = test_pred.to_frame("score")
+        
+    # 定义信号文件的保存路径 
+    SIGNAL_FILE = MODEL_FILE.parent / "lgb_rebound_pred.pkl"
+    
+    # 保存真正的测试集预测信号
+    test_pred.to_pickle(str(SIGNAL_FILE))
+    print(f"✅ 真正回测信号已成功保存至: {SIGNAL_FILE}")
+    
+    # 保存模型本体和特征配置文件
     final_model.to_pickle(str(MODEL_FILE))
     with open(FEATURE_FILE, 'w', encoding='utf-8') as f:
         json.dump({"fields": refined_fields, "names": refined_names}, f, ensure_ascii=False)
     
-    print(f"✅ 模型训练完成！路径: {MODEL_FILE}")
+    print(f"✅ 模型与信号全部训练准备完成！")
+
 
 # ================== 5. 每日推断任务 ==================
 def predict_daily(pool_date: str, stock_pool: list, data_path: str, hold_days: int = 2, topk: int = 6):
@@ -355,6 +374,6 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     if args.mode == "train":
-        train_weekly(args.date, TRASH_POOL, DATA_PATH)
+        train_weekly(args.date, TRASH_POOL, DATA_PATH, hold_days=2, test_end_date="2026-05-01")
     else:
         predict_daily(args.date, TRASH_POOL, DATA_PATH)
