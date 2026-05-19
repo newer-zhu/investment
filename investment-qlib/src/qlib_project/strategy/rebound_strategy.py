@@ -144,7 +144,7 @@ def refine_features_no_leakage(handler_obj, segments, top_k=50):
     # 巧妙构造临时 segments：train 和 valid 指向同一个时间段
     tmp_segments = {
         "train": segments["train"],
-        "valid": segments["train"]  # 【核心修正】用训练集自己做验证
+        "valid": segments["train"]  # 用训练集自己做验证
     }
     ds = DatasetH(handler=handler_obj, segments=tmp_segments)
     
@@ -171,33 +171,38 @@ def refine_features_no_leakage(handler_obj, segments, top_k=50):
     return final_df['field'].tolist(), final_df['name'].tolist()
 
 # ================== 4. 每周离线训练任务 ==================
-def train_weekly(train_end_date: str, stock_pool: list, data_path: str, hold_days: int = 2, test_end_date: str = "2026-03-01"):
-    print(f"\n================ 启动防御型模型训练 ({train_end_date}) ================")
+def train_weekly(test_start_date: str, test_end_date: str, stock_pool: list, data_path: str, hold_days: int = 2):
+    """
+    修复说明：将输入参数改为回测(Test)的开始和结束时间。
+    这彻底杜绝了之前 test_end_date < train_end_date 导致生成的预测信号为 0 行的 bug。
+    """
+    print(f"\n================ 启动防御型模型训练 (预测区间: {test_start_date} 至 {test_end_date}) ================")
     qlib.init(provider_uri=data_path, region=REG_CN)
     
     # 应对 Regime Shift: 仅使用 2021 年以后的数据
     start_train = "2021-01-01" 
-    valid_start = (pd.Timestamp(train_end_date) - pd.Timedelta(days=120)).strftime('%Y-%m-%d')
-    
+    # 验证集使用回测期前 120 天
+    valid_start = (pd.Timestamp(test_start_date) - pd.Timedelta(days=120)).strftime('%Y-%m-%d')
+    # 训练集在此基础上再往前退 3 天，彻底阻断特征泄漏
     train_end_date_actual = (pd.Timestamp(valid_start) - pd.Timedelta(days=3)).strftime('%Y-%m-%d')
     
-    # 🛠️【修复点 1】将 test 段的结束时间延伸至回测结束日
+    # 严格对齐时间分段
     segments = {
         "train": (start_train, train_end_date_actual), 
-        "valid": (valid_start, (pd.Timestamp(train_end_date) - pd.Timedelta(days=1)).strftime('%Y-%m-%d')),
-        "test": (train_end_date, test_end_date) 
+        "valid": (valid_start, (pd.Timestamp(test_start_date) - pd.Timedelta(days=1)).strftime('%Y-%m-%d')),
+        "test": (test_start_date, test_end_date) 
     }
     stock_in = load_stock_pool(stock_pool)
 
     # --- 阶段 1：特征精炼（防泄漏模式） ---
     print("🚀 [阶段 1]：特征初筛（仅基于历史 Train 段）...")
-    base_handler = get_rebound_handler(hold_days)(instruments=stock_in, start_time=start_train, end_time=train_end_date)
+    base_handler = get_rebound_handler(hold_days)(instruments=stock_in, start_time=start_train, end_time=train_end_date_actual)
     refined_fields, refined_names = refine_features_no_leakage(base_handler, segments, top_k=45)
     
     # --- 阶段 2：最终模型训练 ---
     print(f"🚀 [阶段 2]：精炼拟合（保留 {len(refined_names)} 个核心特征）...")
     
-    # 🛠️【修复点 2】将 final_handler 的 end_time 改为 test_end_date，确保生成回测期特征
+    # handler 的结束时间需要包含 test_end_date 才能为回测期生成完整特征
     final_handler = get_rebound_handler(hold_days, refined_fields, refined_names)(
         instruments=stock_in, start_time=start_train, end_time=test_end_date
     )
@@ -219,9 +224,8 @@ def train_weekly(train_end_date: str, stock_pool: list, data_path: str, hold_day
         print(f"📈 验证集 (最近120天) IC: {ic['ic'].mean():.4f}, Rank IC: {ic['rank_ic'].mean():.4f}")
 
     # --- 阶段 4：生成并保存【回测所需的测试集信号】 ---
-    print(f"🚀 [阶段 4]：正在生成回测区间的预测信号 ({train_end_date} ~ {test_end_date})...")
+    print(f"🚀 [阶段 4]：正在生成回测区间的预测信号 ({test_start_date} ~ {test_end_date})...")
     
-    # 🛠️【修复点 3】预测 test 字段，这才是你回测要用的信号
     test_pred = final_model.predict(ds_final, segment="test")
     
     # 统一格式为 DataFrame
@@ -230,6 +234,9 @@ def train_weekly(train_end_date: str, stock_pool: list, data_path: str, hold_day
         
     # 定义信号文件的保存路径 
     SIGNAL_FILE = MODEL_FILE.parent / "lgb_rebound_pred.pkl"
+    
+    # 💡 增加数据诊断，控制台直接打印行数
+    print(f"📊 预测信号生成完毕，总行数: {len(test_pred)}")
     
     # 保存真正的测试集预测信号
     test_pred.to_pickle(str(SIGNAL_FILE))
@@ -240,7 +247,7 @@ def train_weekly(train_end_date: str, stock_pool: list, data_path: str, hold_day
     with open(FEATURE_FILE, 'w', encoding='utf-8') as f:
         json.dump({"fields": refined_fields, "names": refined_names}, f, ensure_ascii=False)
     
-    print(f"✅ 模型与信号全部训练准备完成！")
+    print(f"✅ 模型与信号全部训练准备完成！\n")
 
 
 # ================== 5. 每日推断任务 ==================
@@ -370,10 +377,22 @@ if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser()
     parser.add_argument("--mode", type=str, choices=["train", "predict"], default="predict")
+    # 用于每日阻击推断的日期
     parser.add_argument("--date", type=str, default=pd.Timestamp.now().strftime('%Y-%m-%d'))
+    # 用于控制回测信号生成区间的起止日期
+    parser.add_argument("--test_start", type=str, default="2025-12-01", help="回测的开始日期")
+    parser.add_argument("--test_end", type=str, default="2026-05-01", help="回测的结束日期")
     args = parser.parse_args()
 
     if args.mode == "train":
-        train_weekly(args.date, TRASH_POOL, DATA_PATH, hold_days=2, test_end_date="2026-05-01")
+        # 如果是跑回测模型训练，严格使用 test_start 和 test_end 来划定信号生成区间
+        train_weekly(
+            test_start_date=args.test_start, 
+            test_end_date=args.test_end, 
+            stock_pool=TRASH_POOL, 
+            data_path=DATA_PATH, 
+            hold_days=2
+        )
     else:
+        # 如果是跑实盘或单日预测，依旧沿用单日 date 参数
         predict_daily(args.date, TRASH_POOL, DATA_PATH)
