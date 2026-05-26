@@ -12,6 +12,7 @@ from qlib.data.dataset import DatasetH
 from qlib.contrib.data.handler import Alpha158
 from qlib.contrib.model.gbdt import LGBModel
 from qlib.data import D
+from pandas.tseries.offsets import BDay
 
 # ================== 基础路径配置 ==================
 BASE_DIR = Path(__file__).resolve().parent
@@ -172,26 +173,50 @@ def refine_features_no_leakage(handler_obj, segments, top_k=50):
 
 # ================== 4. 每周离线训练任务 ==================
 def train_weekly(test_start_date: str, test_end_date: str, stock_pool: list, data_path: str, hold_days: int = 2):
-    """
-    修复说明：将输入参数改为回测(Test)的开始和结束时间。
-    这彻底杜绝了之前 test_end_date < train_end_date 导致生成的预测信号为 0 行的 bug。
-    """
     print(f"\n================ 启动防御型模型训练 (预测区间: {test_start_date} 至 {test_end_date}) ================")
+    # 1. 必须先初始化 Qlib，才能调用 D.calendar
     qlib.init(provider_uri=data_path, region=REG_CN)
     
-    # 应对 Regime Shift: 仅使用 2021 年以后的数据
+    # 2. 获取真实的交易日历列表 (涵盖 2021 到 2027，确保覆盖当前 2026 年及后续)
+    cal = D.calendar(start_time="2021-01-01", end_time="2027-12-31")
+    
+    # 3. 锁定测试集开始日期在日历中的索引
+    test_start_dt = pd.Timestamp(test_start_date)
+    # 如果输入的 test_start_date 恰好是假期，searchsorted 会自动指向假期后的第一个交易日
+    test_start_idx = np.searchsorted(cal, test_start_dt)
+    
+    # 4. 严格按照交易日坐标轴（Index）往前推，彻底拉开 hold_days + 1 的安全隔离带
+    # 验证集结束日：测试集开始前第 (hold_days + 1) 个交易日
+    valid_end_idx = test_start_idx - (hold_days + 1)
+    
+    # 验证集长度：用交易日来衡量更精准，80个交易日大约相当于 4 个月的自然日
+    valid_len_trades = 80 
+    valid_start_idx = valid_end_idx - valid_len_trades
+    
+    # 训练集结束日：验证集开始前第 (hold_days + 1) 个交易日
+    train_end_idx = valid_start_idx - (hold_days + 1)
+    
+    # 5. 将索引还原为标准的日期字符串
     start_train = "2021-01-01" 
-    # 验证集使用回测期前 120 天
-    valid_start = (pd.Timestamp(test_start_date) - pd.Timedelta(days=120)).strftime('%Y-%m-%d')
-    # 训练集在此基础上再往前退 3 天，彻底阻断特征泄漏
-    train_end_date_actual = (pd.Timestamp(valid_start) - pd.Timedelta(days=3)).strftime('%Y-%m-%d')
+    train_end_date_actual = cal[train_end_idx].strftime('%Y-%m-%d')
+    valid_start = cal[valid_start_idx].strftime('%Y-%m-%d')
+    valid_end = cal[valid_end_idx].strftime('%Y-%m-%d')
     
     # 严格对齐时间分段
     segments = {
         "train": (start_train, train_end_date_actual), 
-        "valid": (valid_start, (pd.Timestamp(test_start_date) - pd.Timedelta(days=1)).strftime('%Y-%m-%d')),
+        "valid": (valid_start, valid_end),
         "test": (test_start_date, test_end_date) 
     }
+    
+    print(f"📅 [数据划分诊断]：")
+    print(f"   - Train 期间: {segments['train'][0]} ~ {segments['train'][1]}")
+    print(f"   - 🛡️ 隔离带 1 : 间隔 {valid_start_idx - train_end_idx} 个真实交易日")
+    print(f"   - Valid 期间: {segments['valid'][0]} ~ {segments['valid'][1]}")
+    print(f"   - 🛡️ 隔离带 2 : 间隔 {test_start_idx - valid_end_idx} 个真实交易日")
+    print(f"   - Test  期间: {segments['test'][0]} ~ {segments['test'][1]}")
+
+    # ================= 后续逻辑保持不变 =================
     stock_in = load_stock_pool(stock_pool)
 
     # --- 阶段 1：特征精炼（防泄漏模式） ---
@@ -201,19 +226,16 @@ def train_weekly(test_start_date: str, test_end_date: str, stock_pool: list, dat
     
     # --- 阶段 2：最终模型训练 ---
     print(f"🚀 [阶段 2]：精炼拟合（保留 {len(refined_names)} 个核心特征）...")
-    
-    # handler 的结束时间需要包含 test_end_date 才能为回测期生成完整特征
     final_handler = get_rebound_handler(hold_days, refined_fields, refined_names)(
         instruments=stock_in, start_time=start_train, end_time=test_end_date
     )
     ds_final = DatasetH(handler=final_handler, segments=segments)
     
-    # 注入特征名以启用单调约束
     model_params = get_rebound_model_params(hold_days, refined_names)
     final_model = LGBModel(**model_params)
     final_model.fit(ds_final)
     
-    # --- 阶段 3：效能评估 (验证集 IC) ---
+    # --- 阶段 3：效能评估 ---
     valid_pred = final_model.predict(ds_final, segment="valid")
     valid_label = ds_final.prepare(segments="valid", col_set="label")
     if isinstance(valid_pred, pd.Series): valid_pred = valid_pred.to_frame("score")
@@ -221,28 +243,17 @@ def train_weekly(test_start_date: str, test_end_date: str, stock_pool: list, dat
     valid_combined = pd.concat([valid_pred, valid_label], axis=1).dropna()
     if not valid_combined.empty:
         ic = signal_ic(valid_combined.iloc[:, 0], valid_combined.iloc[:, 1])
-        print(f"📈 验证集 (最近120天) IC: {ic['ic'].mean():.4f}, Rank IC: {ic['rank_ic'].mean():.4f}")
+        print(f"📈 验证集 IC: {ic['ic'].mean():.4f}, Rank IC: {ic['rank_ic'].mean():.4f}")
 
-    # --- 阶段 4：生成并保存【回测所需的测试集信号】 ---
+    # --- 阶段 4：生成测试集信号并保存 ---
     print(f"🚀 [阶段 4]：正在生成回测区间的预测信号 ({test_start_date} ~ {test_end_date})...")
-    
     test_pred = final_model.predict(ds_final, segment="test")
-    
-    # 统一格式为 DataFrame
-    if isinstance(test_pred, pd.Series): 
-        test_pred = test_pred.to_frame("score")
+    if isinstance(test_pred, pd.Series): test_pred = test_pred.to_frame("score")
         
-    # 定义信号文件的保存路径 
     SIGNAL_FILE = MODEL_FILE.parent / "lgb_rebound_pred.pkl"
-    
-    # 💡 增加数据诊断，控制台直接打印行数
     print(f"📊 预测信号生成完毕，总行数: {len(test_pred)}")
     
-    # 保存真正的测试集预测信号
     test_pred.to_pickle(str(SIGNAL_FILE))
-    print(f"✅ 真正回测信号已成功保存至: {SIGNAL_FILE}")
-    
-    # 保存模型本体和特征配置文件
     final_model.to_pickle(str(MODEL_FILE))
     with open(FEATURE_FILE, 'w', encoding='utf-8') as f:
         json.dump({"fields": refined_fields, "names": refined_names}, f, ensure_ascii=False)
@@ -380,8 +391,8 @@ if __name__ == "__main__":
     # 用于每日阻击推断的日期
     parser.add_argument("--date", type=str, default=pd.Timestamp.now().strftime('%Y-%m-%d'))
     # 用于控制回测信号生成区间的起止日期
-    parser.add_argument("--test_start", type=str, default="2025-12-01", help="回测的开始日期")
-    parser.add_argument("--test_end", type=str, default="2026-05-01", help="回测的结束日期")
+    parser.add_argument("--test_start", type=str, default="2025-12-15", help="回测的开始日期")
+    parser.add_argument("--test_end", type=str, default="2026-05-15", help="回测的结束日期")
     args = parser.parse_args()
 
     if args.mode == "train":

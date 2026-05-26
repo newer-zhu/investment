@@ -25,13 +25,14 @@ class TwoDayHoldStrategy(BaseStrategy):
         self.topk = topk
         self.bias_limit = bias_limit
         self.holding_days = {} 
+        self.last_update_date = None  # 🔒 核心防御锁：防止单日时间静止死循环
         super().__init__(**kwargs)
 
     def get_current_holdings(self):
+        """准确获取当前账户真实的持仓股票和数量"""
         holdings = {}
         if hasattr(self, 'trade_position'):
             for stock in self.trade_position.get_stock_list():
-                # Qlib Position API provides `get_stock_amount` to query per-stock amount
                 pos = self.trade_position.get_stock_amount(stock)
                 if pos and pos > 0:
                     holdings[stock] = pos
@@ -45,92 +46,111 @@ class TwoDayHoldStrategy(BaseStrategy):
         current_holdings = self.get_current_holdings()
         
         # ==========================================
-        # 核心逻辑 1：更新与维护持仓天数计数器
+        # 核心逻辑 1：🔒 引入单日日期锁，确保天数每日仅自增一次
         # ==========================================
-        for stock in list(self.holding_days.keys()):
-            if stock not in current_holdings:
-                del self.holding_days[stock]
-        
-        for stock in current_holdings.keys():
-            if stock not in self.holding_days:
-                self.holding_days[stock] = 0
-            else:
-                self.holding_days[stock] += 1
+        if self.last_update_date != trade_date_str:
+            # 清理历史已卖出的股票计数
+            for stock in list(self.holding_days.keys()):
+                if stock not in current_holdings:
+                    del self.holding_days[stock]
+            
+            # 更新当前持仓股票的天数计数
+            for stock in current_holdings.keys():
+                if stock not in self.holding_days:
+                    self.holding_days[stock] = 1   # 新买入成功，第 1 天持仓
+                else:
+                    self.holding_days[stock] += 1  # 严格限制：单日仅自增一次
+            
+            # 锁死当前交易日标签
+            self.last_update_date = trade_date_str
 
         # ==========================================
-        # 核心逻辑 2：检查卖出信号 (持有满 2 天)
+        # 核心逻辑 2：同步获取全市场今日行情（用于风控及开盘价计算）
         # ==========================================
+        # 集合今日需要判断的所有标的（当前持仓 + 预测信号覆盖的股票）
+        all_relevant_stocks = list(set(current_holdings.keys()) | set(self.signal.index.get_level_values('instrument')))
+        
+        features_df = D.features(all_relevant_stocks, ["$open", "$close / Mean($close, 5) - 1"], 
+                                 start_time=trade_date, end_time=trade_date)
+        
+        if not features_df.empty:
+            features_df.columns = ['open_price', 'bias_5d']
+            features_df = features_df.reset_index()
+            features_df['instrument'] = features_df['instrument'].astype(str).str.upper()
+            features_df = features_df.set_index('instrument')
+        else:
+            # 如果当天没有任何基础数据，安全返回空决策
+            return TradeDecisionWO(order_list, self)
+
+        # ==========================================
+        # 核心逻辑 3：检查卖出信号 (持有满 2 天) & 预估释放资金
+        # ==========================================
+        estimated_released_cash = 0  # 盘前预估卖出可获得的现金流
+        stocks_to_sell = set()       # 记录今日被强平的标的
+        
         for stock, days in list(self.holding_days.items()):
             if days >= 2:
                 amount = current_holdings[stock]
-                order_list.append(OrderHelper.create(code=stock, amount=amount, direction=OrderDir.SELL))
-                print(f"[{trade_date_str}] 🔴 持有满 2 天，触发卖出下单: {stock} ({amount} 股)")
+                open_price = features_df.loc[stock, 'open_price'] if stock in features_df.index else 0
+                
+                if open_price > 0:
+                    order_list.append(OrderHelper.create(code=stock, amount=amount, direction=OrderDir.SELL))
+                    # 扣除印花税及手续费后，预估释放现金
+                    estimated_released_cash += amount * open_price * 0.998
+                    stocks_to_sell.add(stock)
+                    print(f"[{trade_date_str}] 🔴 持有满 {days} 天，触发卖出下单: {stock} ({amount} 股)")
 
         # ==========================================
-        # 核心逻辑 3：检查买入信号 (根据每日信号建仓)
+        # 核心逻辑 4：资金动态合并，彻底消除持仓滚动断层
+        # ==========================================
+        account = self.common_infra.get("trade_account")
+        current_cash = account.get_cash() if hasattr(account, "get_cash") else getattr(account, "current_cash", 0)
+        
+        # 盘前买入总额度 = 闲置现金 + 盘前强平即将释放的现金
+        total_available_buy_cash = current_cash + estimated_released_cash
+        
+        # ==========================================
+        # 核心逻辑 5：检查买入信号并根据真实额度建仓
         # ==========================================
         signal_dates = pd.to_datetime(self.signal.index.get_level_values('datetime'))
         signal_date_strs = signal_dates.strftime('%Y-%m-%d')
-        
         valid_mask = signal_date_strs <= trade_date_str
+        
         if not valid_mask.any():
             return TradeDecisionWO(order_list, self)
             
         latest_signal_date = signal_date_strs[valid_mask].max()
         current_scores = self.signal[signal_date_strs == latest_signal_date]
 
-        if current_scores.empty:
-            return TradeDecisionWO(order_list, self)
-
         if isinstance(current_scores, pd.DataFrame):
             current_scores = current_scores['score'] if 'score' in current_scores.columns else current_scores.iloc[:, 0]
 
-        instruments = current_scores.index.get_level_values('instrument').unique().tolist()
+        current_scores_single = current_scores.reset_index()
+        current_scores_single['instrument'] = current_scores_single['instrument'].astype(str).str.upper()
+        current_scores_single = current_scores_single.set_index('instrument')['score']
         
-        # 🛠️ 核心修复：直接使用 D.features 同步获取 乖离率 和 开盘价，彻底规避 get_quote_info 失效问题
-        features_df = D.features(instruments, ["$close / Mean($close, 5) - 1", "$open"], 
-                                 start_time=trade_date, end_time=trade_date)
+        # 合并今日得分与行情风控指标
+        combined = pd.DataFrame({'score': current_scores_single}).join(features_df, how='inner')
         
-        if not features_df.empty:
-            features_df.columns = ['bias_5d', 'open_price']
-            features_df = features_df.reset_index()
-            # 强制转为大写，确保与内部信号完美匹配
-            features_df['instrument'] = features_df['instrument'].astype(str).str.upper()
-            features_df = features_df.set_index('instrument')[['bias_5d', 'open_price']]
-            
-            current_scores_single = current_scores.reset_index()
-            current_scores_single['instrument'] = current_scores_single['instrument'].astype(str).str.upper()
-            current_scores_single = current_scores_single.set_index('instrument')['score']
-            
-            # 内连接，完美吻合当日有数据的股票
-            combined = pd.DataFrame({'score': current_scores_single}).join(features_df, how='inner')
-            
-            # 过滤风控：乖离率达标，且开盘价必须有效 (>0)
-            safe_stocks = combined[(combined['bias_5d'] < self.bias_limit) & (combined['open_price'] > 0)]
-            current_scores = safe_stocks['score']
-            open_prices = safe_stocks['open_price']
-        else:
-            return TradeDecisionWO(order_list, self)
-
-        current_scores = current_scores.dropna().sort_values(ascending=False)
+        # 核心超跌风控：5日乖离率必须跌破阈值，且开盘有效
+        safe_stocks = combined[(combined['bias_5d'] < self.bias_limit) & (combined['open_price'] > 0)]
+        current_scores = safe_stocks['score'].dropna().sort_values(ascending=False)
         topk_list = current_scores.head(self.topk).index.tolist()
-
-        account = self.common_infra.get("trade_account")
-        available_cash = account.get_cash() if hasattr(account, "get_cash") else getattr(account, "current_cash", 0)
         
-        stocks_to_buy = [s for s in topk_list if s not in current_holdings]
+        # 🛡️ 核心风控：如果一只股票今天刚好触发“持有满2天卖出”，则今天绝对不重新买回，防止账目混乱
+        stocks_to_buy = [s for s in topk_list if (s not in current_holdings) and (s not in stocks_to_sell)]
         
-        if len(stocks_to_buy) > 0 and available_cash > 0:
-            cash_per_stock = (available_cash * 0.97) / len(stocks_to_buy) 
+        if len(stocks_to_buy) > 0 and total_available_buy_cash > 10000:
+            # 预留 3% 的摩擦垫片防止滑点或手续费导致超额报单失败
+            cash_per_stock = (total_available_buy_cash * 0.97) / len(stocks_to_buy)
             
             for stock in stocks_to_buy:
-                # 🛠️ 核心修复：直接从已获取的行情中提取开盘价
-                price = open_prices.get(stock)
+                price = features_df.loc[stock, 'open_price']
                 if pd.notna(price) and price > 0:
                     shares = int(cash_per_stock / price / 100) * 100
                     if shares > 0:
                         order_list.append(OrderHelper.create(code=stock, amount=shares, direction=OrderDir.BUY))
-                        print(f"[{trade_date_str}] 🟢 触发买入下单: {stock} (预估买入 {shares} 股, 开盘单价: {price:.2f})")
+                        print(f"[{trade_date_str}] 🟢 触发买入下单: {stock} (预估买入 {shares} 股, 分配金额: {cash_per_stock:.2f}, 开盘价: {price:.2f})")
 
         return TradeDecisionWO(order_list, self)
         
@@ -184,8 +204,8 @@ if __name__ == "__main__":
 
         print("🚀 开始回测...")
         report_dict, indicator_dict = backtest(
-            start_time="2025-12-08",
-            end_time="2026-04-01",
+            start_time="2025-12-15",
+            end_time="2026-05-15",
             strategy=strategy_config,
             executor=executor_config,
             benchmark="SH000300",
