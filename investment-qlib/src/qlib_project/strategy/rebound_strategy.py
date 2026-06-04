@@ -32,7 +32,6 @@ MODEL_DIR.mkdir(parents=True, exist_ok=True)
 MODEL_FILE = MODEL_DIR / "lgb_rebound_model.pkl"
 FEATURE_FILE = MODEL_DIR / "rebound_refined_features.json"
 
-# ================== 1. 改进的模型参数配置 ==================
 def get_rebound_model_params(hold_days: int, feature_names: list = None):
     """
     针对超跌反弹定制：
