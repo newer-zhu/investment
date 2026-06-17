@@ -9,3 +9,5 @@ python3 /qlib/scripts/dump_bin.py dump_all  \
      --qlib_dir  /output/qlib_bin/   \
        --date_field_name=tradedate   \
          --exclude_fields=tradedate,symbol,end_date
+
+/home/holden/miniconda3/envs/qlib/bin/python /mnt/f/Code/investment/investment-qlib/src/qlib_project/strategy/rebound_strategy.py --mode=predict --date=2026-06-17
