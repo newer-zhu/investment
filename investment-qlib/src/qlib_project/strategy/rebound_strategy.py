@@ -25,12 +25,14 @@ for path in (str(BASE_DIR), str(PROJECT_ROOT), str(SRC_ROOT)):
 from qlib_project.constants import TRASH_POOL, DATA_PATH
 from qlib_project.utils.util import load_stock_pool, send_email, load_config_from_ini
 from qlib_project.utils.email_report_utils import generate_rebound_report_html
+from qlib_project.utils.backend_score_sender import build_backend_records_from_result, save_scores_to_backend
 
 # 存储路径
 MODEL_DIR = PROJECT_ROOT / "data" / "models" / "rebound"
 MODEL_DIR.mkdir(parents=True, exist_ok=True)
 MODEL_FILE = MODEL_DIR / "lgb_rebound_model.pkl"
 FEATURE_FILE = MODEL_DIR / "rebound_refined_features.json"
+
 
 def get_rebound_model_params(hold_days: int, feature_names: list = None):
     """
@@ -337,6 +339,14 @@ def predict_daily(pool_date: str, stock_pool: list, data_path: str, hold_days: i
     print(f"\n✅ {pool_date} 阻击名单 (Join 数: {len(final)}, 选出: {len(result)}):")
     if not result.empty:
         print(result[['score', 'bias_5d', 'vol_ratio']])
+
+        backend_records = build_backend_records_from_result(result, pool_date)
+        backend_response = save_scores_to_backend(backend_records)
+        if backend_response.get("success"):
+            print(f"📤 后端批量保存成功，计数: {backend_response.get('count', len(backend_records))}")
+        else:
+            print(f"⚠️ 后端批量保存未成功: {backend_response.get('message', 'unknown error')}")
+
         # 保存结果
         RESULT_DIR = PROJECT_ROOT / "data" / "rebound_predictions"
         RESULT_DIR.mkdir(parents=True, exist_ok=True)
