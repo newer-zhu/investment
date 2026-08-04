@@ -103,23 +103,25 @@ def signal_ic(score, label):
     return pd.DataFrame({"ic": ic_list, "rank_ic": rank_ic_list})
 
 # ================== 2. 数据处理器 ==================
-def get_rebound_handler(hold_days: int, refined_fields=None, refined_names=None):
-    # 预测目标：未来2日最高价相对于今日收盘的涨幅（捕捉反弹瞬间）
-    label_expr = "If(Ref($high, -1) > Ref($high, -2), Ref($high, -1), Ref($high, -2)) / Ref($open, -1) - 1"
+def get_rebound_handler(hold_days: int = 2, refined_fields=None, refined_names=None):
+    # 预测目标：T日收盘买入，持仓 hold_days 天后在 T+hold_days 日收盘卖出的收益率
+    # 注意：Ref($close, -N) 在 Qlib 中代表未来第 N 个交易日的收盘价
+    label_expr = f"Ref($close, -{hold_days}) / $close - 1"
     
     class ReboundAlpha158(Alpha158):
         def get_label_config(self):
             return ([label_expr], ["LABEL_REBOUND"])
             
         def get_feature_config(self):
-            # 基础反弹逻辑因子
+            # 针对尾盘买入超跌反弹优化的基础因子
             extra_fields = [
-                "$close / Mean($close, 5) - 1", 
-                "$close / Mean($close, 20) - 1", 
-                "$amount / Mean($amount, 5)", 
-                "($high - $low) / $close"
+                "$close / Mean($close, 5) - 1",         # 5日均线乖离率
+                "$close / Mean($close, 20) - 1",        # 20日均线乖离率
+                "$amount / Mean($amount, 5)",           # 5日成交额比（量能变化）
+                "($high - $low) / $close",             # 日内振幅
+                "($close - $open) / ($high - $low + 1e-12)" # 实体K线比例（排除分母为0）
             ]
-            extra_names = ["bias_5d", "bias_20d", "vol_ratio", "amp_1d"]
+            extra_names = ["bias_5d", "bias_20d", "vol_ratio", "amp_1d", "body_ratio"]
 
             if refined_fields and refined_names:
                 return refined_fields, refined_names
@@ -132,30 +134,35 @@ def get_rebound_handler(hold_days: int, refined_fields=None, refined_names=None)
         def get_learn_processors(self):
             return [
                 {"class": "ConfigSectionProcessor", "kwargs": {"fillna_label": True, "clip_label_outlier": True}},
-                {"class": "CSZScoreNorm", "kwargs": {"fields_group": "feature"}} # 横向标准化
+                {"class": "CSZScoreNorm", "kwargs": {"fields_group": "feature"}}
             ]
             
     return ReboundAlpha158
 
-def refine_features_no_leakage(handler_obj, segments, top_k=50):
+
+def refine_features_no_leakage(handler_obj, segments, top_k=45):
     """
-    为了防止泄漏，我们新创建一个临时的简单模型。
-    利用 Qlib 的特性：强制要求 valid 集。我们将 train 的时间段同时赋给 valid，
-    从而在满足底层 API 的同时，彻底隔绝真实的 valid 数据。
+    无泄漏特征筛选：在 Train 段内部按 8:2 切分内部验证集，评估 Out-of-Fold 真实重要性。
     """
-    # 巧妙构造临时 segments：train 和 valid 指向同一个时间段
+    train_start, train_end = segments["train"]
+    train_start_dt = pd.to_datetime(train_start)
+    train_end_dt = pd.to_datetime(train_end)
+    split_dt = train_start_dt + (train_end_dt - train_start_dt) * 0.8
+    
+    # 构造内部 Segments，彻底隔绝外部真实 Valid/Test 阶段
     tmp_segments = {
-        "train": segments["train"],
-        "valid": segments["train"]  # 用训练集自己做验证
+        "train": (train_start, split_dt.strftime("%Y-%m-%d")),
+        "valid": ((split_dt + pd.Timedelta(days=1)).strftime("%Y-%m-%d"), train_end)
     }
     ds = DatasetH(handler=handler_obj, segments=tmp_segments)
     
-    # 恢复正常的整数配置（这里的 early_stopping 实际上是在监控 train 的 error，几乎不会提前停止）
     tmp_model = LGBModel(
-        n_estimators=100, 
-        learning_rate=0.1, 
+        n_estimators=300, 
+        learning_rate=0.05, 
         max_depth=3, 
-        early_stopping_rounds=50, # 恢复整数传入
+        subsample=0.8,
+        colsample_bytree=0.6,        # 强制特征采样，防止强特征遮蔽次强特征
+        early_stopping_rounds=30,    # 在内部 valid 上有效触发 early-stopping
         verbosity=-1
     )
     tmp_model.fit(ds)
@@ -165,12 +172,16 @@ def refine_features_no_leakage(handler_obj, segments, top_k=50):
     
     df = pd.DataFrame({'name': names, 'field': fields, 'imp': importance}).sort_values('imp', ascending=False)
     
-    # 强制保留核心反弹因子
-    core_names = ["bias_5d", "bias_20d", "vol_ratio", "amp_1d"]
-    refined_df = df[~df['name'].isin(core_names)].head(top_k - len(core_names))
-    final_df = pd.concat([df[df['name'].isin(core_names)], refined_df])
+    # 补齐完整的 5 大核心反弹因子
+    core_names = ["bias_5d", "bias_20d", "vol_ratio", "amp_1d", "body_ratio"]
+    existing_core = [n for n in core_names if n in df['name'].values]
+    
+    non_core_k = max(0, top_k - len(existing_core))
+    refined_df = df[~df['name'].isin(existing_core)].head(non_core_k)
+    final_df = pd.concat([df[df['name'].isin(existing_core)], refined_df])
     
     return final_df['field'].tolist(), final_df['name'].tolist()
+
 
 # ================== 4. 每周离线训练任务 ==================
 def train_weekly(test_start_date: str, test_end_date: str, stock_pool: list, data_path: str, hold_days: int = 2):
@@ -288,7 +299,7 @@ def predict_daily(pool_date: str, stock_pool: list, data_path: str, hold_days: i
         model = pickle.load(f)
 
     # 3. 预测
-    lookback = (pd.Timestamp(pool_date) - pd.Timedelta(days=60)).strftime('%Y-%m-%d')
+    lookback = (pd.Timestamp(pool_date) - pd.Timedelta(days=120)).strftime('%Y-%m-%d')
     handler = get_rebound_handler(hold_days, feat_conf['fields'], feat_conf['names'])(
         instruments=stock_in, start_time=lookback, end_time=pool_date
     )
