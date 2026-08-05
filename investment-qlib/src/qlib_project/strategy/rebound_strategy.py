@@ -1,7 +1,6 @@
 import os
 import gc
 import json
-import pickle
 from pathlib import Path
 import sys
 import pandas as pd
@@ -27,11 +26,44 @@ from qlib_project.utils.util import load_stock_pool, send_email, load_config_fro
 from qlib_project.utils.email_report_utils import generate_rebound_report_html
 from qlib_project.utils.backend_score_sender import build_backend_records_from_result, save_scores_to_backend
 
-# 存储路径
+# ================== 存储路径 ==================
 MODEL_DIR = PROJECT_ROOT / "data" / "models" / "rebound"
 MODEL_DIR.mkdir(parents=True, exist_ok=True)
 MODEL_FILE = MODEL_DIR / "lgb_rebound_model.pkl"
 FEATURE_FILE = MODEL_DIR / "rebound_refined_features.json"
+
+# ================== 共享因子表达式 (Handler 与 predict_daily 共用，避免重复定义) ==================
+_REBOUND_EXTRA_FIELDS = [
+    "$close / Mean($close, 5) - 1",          # 5日均线乖离率
+    "$close / Mean($close, 20) - 1",         # 20日均线乖离率
+    "$amount / Mean($amount, 5)",            # 5日成交额比（量能变化）
+    "($high - $low) / $close",               # 日内振幅
+    "($close - $open) / ($high - $low + 1e-12)",  # 实体K线比例
+]
+_REBOUND_EXTRA_NAMES = ["bias_5d", "bias_20d", "vol_ratio", "amp_1d", "body_ratio"]
+
+# predict_daily 风控只需要前4个因子（bias_5d, bias_20d, vol_ratio, amp_1d）
+_REBOUND_RISK_FIELDS = _REBOUND_EXTRA_FIELDS[:4]
+_REBOUND_RISK_NAMES  = _REBOUND_EXTRA_NAMES[:4]
+
+# ================== Qlib 初始化 (模块级，只执行一次) ==================
+_qlib_initialized = False
+
+
+def _ensure_qlib_init(data_path: str = None):
+    """惰性初始化 Qlib，确保 data_path 与调用方一致。"""
+    global _qlib_initialized
+    if not _qlib_initialized:
+        provider = data_path or DATA_PATH
+        qlib.init(provider_uri=provider, region=REG_CN)
+        _qlib_initialized = True
+    else:
+        # 已初始化，但允许切换到不同的 data_path（如 train 用不同数据源）
+        from qlib.config import C
+        current = C.get_data_path()
+        target = str(data_path or DATA_PATH)
+        if current != target:
+            qlib.init(provider_uri=target, region=REG_CN)
 
 
 def get_rebound_model_params(hold_days: int, feature_names: list = None):
@@ -75,31 +107,35 @@ def get_rebound_model_params(hold_days: int, feature_names: list = None):
     return params
 
 
-def signal_ic(score, label):
-    """Compute daily IC and rank IC for signal scores and labels."""
+def signal_ic(score, label) -> pd.DataFrame:
+    """
+    计算每日 IC 和 Rank IC。
+    Qlib 内置的 evaluate 模块不提供 IC 计算，因此自己实现。
+    适配 Qlib 标准 MultiIndex: (datetime, instrument)。
+    """
     df = pd.concat([score.rename("score"), label.rename("label")], axis=1).dropna()
     if df.empty:
         return pd.DataFrame({"ic": [], "rank_ic": []})
 
+    # Qlib 标准格式: MultiIndex (datetime, instrument)
     if isinstance(df.index, pd.MultiIndex):
-        if "datetime" in df.index.names:
-            group = df.groupby(level="datetime")
-        else:
-            group = df.groupby(level=0)
-    elif "datetime" in df.columns:
-        group = df.groupby("datetime")
+        group = df.groupby(level=0)  # level=0 总是 datetime
     else:
-        group = [(None, df)]
+        # 兜底: 单层索引按日期列分组
+        if "datetime" in df.columns:
+            group = df.groupby("datetime")
+        else:
+            return pd.DataFrame({"ic": [df["score"].corr(df["label"])],
+                                 "rank_ic": [df["score"].rank().corr(df["label"].rank())]})
 
-    ic_list = []
-    rank_ic_list = []
+    ic_list, rank_ic_list = [], []
     for _, sub in group:
         if len(sub) < 2:
             ic_list.append(np.nan)
             rank_ic_list.append(np.nan)
-            continue
-        ic_list.append(sub["score"].corr(sub["label"]))
-        rank_ic_list.append(sub["score"].rank().corr(sub["label"].rank()))
+        else:
+            ic_list.append(sub["score"].corr(sub["label"]))
+            rank_ic_list.append(sub["score"].rank().corr(sub["label"].rank()))
     return pd.DataFrame({"ic": ic_list, "rank_ic": rank_ic_list})
 
 # ================== 2. 数据处理器 ==================
@@ -113,22 +149,13 @@ def get_rebound_handler(hold_days: int = 2, refined_fields=None, refined_names=N
             return ([label_expr], ["LABEL_REBOUND"])
             
         def get_feature_config(self):
-            # 针对尾盘买入超跌反弹优化的基础因子
-            extra_fields = [
-                "$close / Mean($close, 5) - 1",         # 5日均线乖离率
-                "$close / Mean($close, 20) - 1",        # 20日均线乖离率
-                "$amount / Mean($amount, 5)",           # 5日成交额比（量能变化）
-                "($high - $low) / $close",             # 日内振幅
-                "($close - $open) / ($high - $low + 1e-12)" # 实体K线比例（排除分母为0）
-            ]
-            extra_names = ["bias_5d", "bias_20d", "vol_ratio", "amp_1d", "body_ratio"]
-
+            # 如果传入了精炼后的特征，直接使用
             if refined_fields and refined_names:
                 return refined_fields, refined_names
-            
+
             conf = super().get_feature_config()
-            conf[0].extend(extra_fields)
-            conf[1].extend(extra_names)
+            conf[0].extend(_REBOUND_EXTRA_FIELDS)
+            conf[1].extend(_REBOUND_EXTRA_NAMES)
             return conf
 
         def get_learn_processors(self):
@@ -186,8 +213,7 @@ def refine_features_no_leakage(handler_obj, segments, top_k=45):
 # ================== 4. 每周离线训练任务 ==================
 def train_weekly(test_start_date: str, test_end_date: str, stock_pool: list, data_path: str, hold_days: int = 2):
     print(f"\n================ 启动防御型模型训练 (预测区间: {test_start_date} 至 {test_end_date}) ================")
-    # 1. 必须先初始化 Qlib，才能调用 D.calendar
-    qlib.init(provider_uri=data_path, region=REG_CN)
+    _ensure_qlib_init(data_path)
     
     # 2. 获取真实的交易日历列表 (涵盖 2021 到 2027，确保覆盖当前 2026 年及后续)
     cal = D.calendar(start_time="2021-01-01", end_time="2027-12-31")
@@ -276,7 +302,7 @@ def train_weekly(test_start_date: str, test_end_date: str, stock_pool: list, dat
 # ================== 5. 每日推断任务 ==================
 def predict_daily(pool_date: str, stock_pool: list, data_path: str, hold_days: int = 2, topk: int = 6):
     print(f"\n================ 执行每日阻击预测 ({pool_date}) ================")
-    qlib.init(provider_uri=data_path, region=REG_CN)
+    _ensure_qlib_init(data_path)
     stock_in = load_stock_pool(stock_pool)
     
     # 1. 环境风控：大盘必须企稳，广度必须尚可
@@ -295,8 +321,7 @@ def predict_daily(pool_date: str, stock_pool: list, data_path: str, hold_days: i
     with open(FEATURE_FILE, 'r', encoding='utf-8') as f:
         feat_conf = json.load(f)
     
-    with open(MODEL_FILE, 'rb') as f:
-        model = pickle.load(f)
+    model = LGBModel.load(MODEL_FILE)
 
     # 3. 预测
     lookback = (pd.Timestamp(pool_date) - pd.Timedelta(days=120)).strftime('%Y-%m-%d')
@@ -316,9 +341,8 @@ def predict_daily(pool_date: str, stock_pool: list, data_path: str, hold_days: i
 
     print(f"DEBUG: 预测得分表(scores)样本数: {len(scores)}")
 
-    # --- E. 行情风控数据清洗 ---
-    risk_fields = ["$close/Mean($close,5)-1", "$close/Mean($close,20)-1", "$amount/Mean($amount,5)", "($high-$low)/$close"]
-    risk_df_raw = D.features(stock_in, risk_fields, start_time=pool_date, end_time=pool_date)
+    # --- E. 行情风控数据清洗 (使用共享常量，与 Handler 保持一致) ---
+    risk_df_raw = D.features(stock_in, _REBOUND_RISK_FIELDS, start_time=pool_date, end_time=pool_date)
     
     if risk_df_raw.empty:
         print(f"❌ 错误: D.features 无法获取字段数据。")
@@ -333,19 +357,29 @@ def predict_daily(pool_date: str, stock_pool: list, data_path: str, hold_days: i
         risk_data = risk_df_raw.xs(pd.Timestamp(pool_date), level=1)
 
     # 规范化列名和索引
-    risk_data.columns = ['bias_5d', 'bias_20d', 'vol_ratio', 'amp_1d']
+    risk_data.columns = _REBOUND_RISK_NAMES
     risk_data.index = risk_data.index.astype(str).str.upper().str.strip()
 
     print(f"DEBUG: 行情风控表(risk_data)样本数: {len(risk_data)}")
     if len(risk_data) > 0:
         print(f"DEBUG: 修正后的 Risk ID 示例: '{risk_data.index[0]}'")
 
-    # --- F. 合并 ---
+    # --- F. 合并 + 自适应筛选 ---
     final = scores[['score']].join(risk_data[['bias_5d', 'bias_20d', 'vol_ratio', 'amp_1d']], how='inner')
     print(f"DEBUG: 参与形态过滤的股票总数 (Join后): {len(final)}")
-    # 过滤条件：5日乖离率够低，且成交量没有异常放大（防止下跌放量承接不住）
-    mask = (final['bias_5d'] < -0.035) & (final['vol_ratio'] < 1.3)
-    result = final[mask].sort_values('score', ascending=False).head(topk)
+
+    # 两层筛选替代固定阈值：
+    # 1. 质量门: 排除成交量异常放大的股票（放量杀跌难以判断承接力）
+    candidates = final[final['vol_ratio'] < 1.5].copy()
+    print(f"DEBUG: 量比<1.5 后剩余: {len(candidates)} 只")
+
+    # 2. 自适应超跌: 取候选池中偏5d最"超跌"的底部分位，而非硬阈值
+    #    上涨市取相对最弱的，下跌市自然收敛到真正的超跌股
+    bias_threshold = candidates['bias_5d'].quantile(0.30)  # 底部 30%
+    oversold = candidates[candidates['bias_5d'] < bias_threshold]
+    print(f"DEBUG: bias_5d 底部30%阈值={bias_threshold:.4f}, 剩余: {len(oversold)} 只")
+
+    result = oversold.sort_values('score', ascending=False).head(topk)
 
     print(f"\n✅ {pool_date} 阻击名单 (Join 数: {len(final)}, 选出: {len(result)}):")
     if not result.empty:
