@@ -9,6 +9,8 @@ FINANCE_PATH = PROJECT_ROOT / "data" / "source"  / "finance"
 
 FILTERED_POOL = DATA_PATH / "instruments" / "my_filtered_pool.txt"
 TRASH_POOL = DATA_PATH / "instruments" / "my_trash_pool.txt"
+# 基础池: 仅主板+行业过滤（不含动态量价过滤），用于滚动训练的每周刷新
+BASE_POOL = DATA_PATH / "instruments" / "my_base_pool.txt"
 TUSHARE_TOKEN= "2f80f707c09dc4ce6c59eb215739349f7a203485b19b4401a683bb6549ec"
 
 TECH_KEYWORDS = [

@@ -21,7 +21,7 @@ for path in (str(BASE_DIR), str(PROJECT_ROOT), str(SRC_ROOT)):
     if path not in sys.path:
         sys.path.insert(0, path)
 
-from qlib_project.constants import TRASH_POOL, DATA_PATH
+from qlib_project.constants import TRASH_POOL, BASE_POOL, DATA_PATH
 from qlib_project.utils.util import load_stock_pool, send_email, load_config_from_ini
 from qlib_project.utils.email_report_utils import generate_rebound_report_html
 from qlib_project.utils.backend_score_sender import build_backend_records_from_result, save_scores_to_backend
@@ -140,7 +140,7 @@ def signal_ic(score, label) -> pd.DataFrame:
 
 # ================== 2. 数据处理器 ==================
 def get_rebound_handler(hold_days: int = 2, refined_fields=None, refined_names=None):
-    # 预测目标：T日收盘买入，持仓 hold_days 天后在 T+hold_days 日收盘卖出的收益率
+    # 预测目标：T日收盘买入 → T+hold_days日收盘卖出
     # 注意：Ref($close, -N) 在 Qlib 中代表未来第 N 个交易日的收盘价
     label_expr = f"Ref($close, -{hold_days}) / $close - 1"
     
@@ -438,26 +438,225 @@ def predict_daily(pool_date: str, stock_pool: list, data_path: str, hold_days: i
 
     return result
 
+# ================== 6. 滚动训练模式（防前瞻偏差） ==================
+def _refresh_pool_for_date(base_codes: list, ref_date: str, target_size: int = 250) -> list:
+    """
+    基于指定日期的量价数据，对基础池做情绪/超跌过滤。
+    逻辑与 select_trash.filter_by_price_retail 一致，但日期可控。
+    """
+    if not base_codes:
+        return []
+    try:
+        fields = [
+            "$close / $factor",
+            "Mean(($high - $low) / $close, 20)",
+            "$amount",
+            "($close - Mean($close, 20)) / Mean($close, 20)",
+            "Mean($amount, 5) / Mean($amount, 20)",
+            "Sum(If($close < Ref($close,1), 1, 0), 10)",
+            "($close - Min($close,20)) / Min($close,20)",
+        ]
+        df = D.features(base_codes, fields, start_time=ref_date, end_time=ref_date)
+        if df is None or df.empty:
+            return base_codes
+        df.columns = ["real_price", "amp", "amount", "bias", "amount_ratio",
+                      "down_days", "dist_low"]
+
+        amt_thresh = df["amount"].quantile(0.15)
+        mask_base = (df["real_price"] > 2.0) & (df["real_price"] < 50) & (df["amount"] > amt_thresh)
+
+        cond_oversold   = (df["bias"] < -0.12) & (df["dist_low"] < 0.05)
+        cond_compressed = (df["down_days"] >= 8) & (df["amp"] < 0.02)
+        cond_active     = (df["amp"] > 0.035) & (df["amount_ratio"] > 1.2) & (df["bias"] < -0.05)
+
+        filtered = df[mask_base & (cond_oversold | cond_compressed | cond_active)]
+        result = filtered.index.get_level_values("instrument").unique().tolist()
+
+        if len(result) < target_size:
+            cond_t1 = (df["amp"] > 0.03) & (df["amount_ratio"] > 1.1) & (df["bias"] < -0.05)
+            tier1 = df[mask_base & (cond_oversold | cond_compressed | cond_t1)]
+            result = tier1.index.get_level_values("instrument").unique().tolist()
+
+        if len(result) < target_size:
+            cond_t2_c = (df["down_days"] >= 7) & (df["amp"] < 0.025)
+            cond_t2_a = (df["amp"] > 0.025) & (df["amount_ratio"] > 1.05) & (df["bias"] < -0.05)
+            tier2 = df[mask_base & (cond_oversold | cond_t2_c | cond_t2_a)]
+            result = tier2.index.get_level_values("instrument").unique().tolist()
+
+        if len(result) < target_size:
+            cond_t3 = (df["bias"] < -0.08) | (df["down_days"] >= 7)
+            tier3 = df[mask_base & cond_t3]
+            result = tier3.index.get_level_values("instrument").unique().tolist()
+
+        return result
+    except Exception as e:
+        print(f"   ⚠️ 池刷新异常 ({ref_date}): {e}")
+        return base_codes
+
+
+def roll_train(
+    test_start_date: str, test_end_date: str, stock_pool_path: str, data_path: str,
+    hold_days: int = 5, retrain_freq: str = "W-MON"
+):
+    """
+    按周滚动重训练，每周刷新股票池 + 重训模型，杜绝前瞻偏差。
+    
+    Args:
+        stock_pool_path: 基础池文件路径（mainboard + 行业过滤后的静态池）
+        retrain_freq: 重训练频率，默认每周一
+    """
+    print(f"\n{'='*60}")
+    print(f"🔄 滚动训练模式: {test_start_date} → {test_end_date}")
+    print(f"   重训频率: {retrain_freq}, 持仓周期: {hold_days}天")
+    print(f"{'='*60}")
+
+    qlib.init(provider_uri=data_path, region=REG_CN)
+    cal = D.calendar(start_time="2021-01-01", end_time="2027-12-31")
+
+    # 加载基础池（mainboard + 行业过滤，每周期动态刷新量价部分）
+    base_pool = load_stock_pool(stock_pool_path)
+    print(f"📦 基础池: {len(base_pool)} 只 (主板+行业过滤)")
+
+    test_start_dt = pd.Timestamp(test_start_date)
+    test_end_dt = pd.Timestamp(test_end_date)
+
+    # 生成每周起始日期
+    week_starts = pd.date_range(start=test_start_dt, end=test_end_dt, freq=retrain_freq)
+    if len(week_starts) == 0:
+        week_starts = [test_start_dt]
+
+    all_predictions = []
+    total_weeks = len(week_starts)
+
+    for i, week_start in enumerate(week_starts):
+        # 本周结束日 = 下周一的前一天（或 test_end）
+        if i + 1 < total_weeks:
+            week_end = week_starts[i + 1] - pd.Timedelta(days=1)
+        else:
+            week_end = test_end_dt
+
+        # 对齐到交易日
+        week_start_idx = np.searchsorted(cal, week_start)
+        week_end_idx = np.searchsorted(cal, week_end)
+        if week_start_idx >= len(cal) or week_end_idx >= len(cal):
+            continue
+        
+        actual_week_start = cal[week_start_idx]
+        actual_week_end = min(cal[week_end_idx], pd.Timestamp(test_end_date))
+
+        if actual_week_start > actual_week_end:
+            continue
+
+        week_start_str = actual_week_start.strftime('%Y-%m-%d')
+        week_end_str = actual_week_end.strftime('%Y-%m-%d')
+
+        # 训练集: 本周开始前的所有数据 (隔离 hold_days+1)
+        valid_end_idx = week_start_idx - (hold_days + 1)
+        valid_len = 80
+        valid_start_idx = valid_end_idx - valid_len
+        train_end_idx = valid_start_idx - (hold_days + 1)
+
+        if train_end_idx < 0:
+            print(f"  ⏭️ 第{i+1}/{total_weeks}周 ({week_start_str}~{week_end_str}): 训练数据不足，跳过")
+            continue
+
+        train_start = "2021-01-01"
+        train_end = cal[train_end_idx].strftime('%Y-%m-%d')
+        valid_start = cal[valid_start_idx].strftime('%Y-%m-%d')
+        valid_end = cal[valid_end_idx].strftime('%Y-%m-%d')
+
+        print(f"\n{'─'*50}")
+        print(f"📅 第{i+1}/{total_weeks}周: 预测 {week_start_str} ~ {week_end_str}")
+        print(f"   Train: {train_start} ~ {train_end}")
+        print(f"   Valid: {valid_start} ~ {valid_end}")
+        print(f"   Test:  {week_start_str} ~ {week_end_str}")
+
+        segments = {
+            "train": (train_start, train_end),
+            "valid": (valid_start, valid_end),
+            "test": (week_start_str, week_end_str),
+        }
+
+        stock_in = _refresh_pool_for_date(base_pool, week_start_str, target_size=250)
+        print(f"   📦 动态池: {len(stock_in)} 只 (基于 {week_start_str} 量价过滤)")
+
+        # 特征精炼
+        base_handler = get_rebound_handler(hold_days)(
+            instruments=stock_in, start_time=train_start, end_time=train_end
+        )
+        refined_fields, refined_names = refine_features_no_leakage(base_handler, segments, top_k=45)
+
+        # 训练
+        final_handler = get_rebound_handler(hold_days, refined_fields, refined_names)(
+            instruments=stock_in, start_time=train_start, end_time=week_end_str
+        )
+        ds_final = DatasetH(handler=final_handler, segments=segments)
+
+        model_params = get_rebound_model_params(hold_days, refined_names)
+        model = LGBModel(**model_params)
+        model.fit(ds_final)
+
+        # 评估
+        valid_pred = model.predict(ds_final, segment="valid")
+        valid_label = ds_final.prepare(segments="valid", col_set="label")
+        if isinstance(valid_pred, pd.Series):
+            valid_pred = valid_pred.to_frame("score")
+        valid_combined = pd.concat([valid_pred, valid_label], axis=1).dropna()
+        if not valid_combined.empty:
+            ic = signal_ic(valid_combined.iloc[:, 0], valid_combined.iloc[:, 1])
+            print(f"   📈 Valid IC: {ic['ic'].mean():.4f}, Rank IC: {ic['rank_ic'].mean():.4f}")
+
+        # 预测本周
+        test_pred = model.predict(ds_final, segment="test")
+        if isinstance(test_pred, pd.Series):
+            test_pred = test_pred.to_frame("score")
+        all_predictions.append(test_pred)
+        print(f"   ✅ 生成 {len(test_pred)} 条信号")
+
+    if not all_predictions:
+        print("❌ 没有生成任何预测信号！")
+        return
+
+    # 合并所有周信号
+    final_pred = pd.concat(all_predictions)
+    final_pred = final_pred[~final_pred.index.duplicated(keep='first')]
+    final_pred = final_pred.sort_index()
+
+    SIGNAL_FILE = MODEL_FILE.parent / "lgb_rebound_pred.pkl"
+    final_pred.to_pickle(str(SIGNAL_FILE))
+    print(f"\n{'='*60}")
+    print(f"✅ 滚动训练完成！累计 {len(final_pred)} 条信号 → {SIGNAL_FILE}")
+    print(f"{'='*60}")
+
+
 if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser()
-    parser.add_argument("--mode", type=str, choices=["train", "predict"], default="predict")
+    parser.add_argument("--mode", type=str, choices=["train", "predict", "roll"], default="predict")
     # 用于每日阻击推断的日期
     parser.add_argument("--date", type=str, default=pd.Timestamp.now().strftime('%Y-%m-%d'))
     # 用于控制回测信号生成区间的起止日期
-    parser.add_argument("--test_start", type=str, default="2025-12-15", help="回测的开始日期")
-    parser.add_argument("--test_end", type=str, default="2026-05-15", help="回测的结束日期")
+    parser.add_argument("--test_start", type=str, default="2026-02-01", help="回测的开始日期")
+    parser.add_argument("--test_end", type=str, default="2026-07-20", help="回测的结束日期")
+    # 持仓周期（需与回测 hold_days 保持一致）
+    parser.add_argument("--hold_days", type=int, default=5, help="持仓天数 (预测目标)")
     args = parser.parse_args()
 
     if args.mode == "train":
-        # 如果是跑回测模型训练，严格使用 test_start 和 test_end 来划定信号生成区间
         train_weekly(
             test_start_date=args.test_start, 
             test_end_date=args.test_end, 
             stock_pool=TRASH_POOL, 
             data_path=DATA_PATH, 
-            hold_days=2
+            hold_days=args.hold_days
+        )
+    elif args.mode == "roll":
+        roll_train(
+            test_start_date=args.test_start,
+            test_end_date=args.test_end,
+            stock_pool_path=BASE_POOL,
+            data_path=DATA_PATH,
+            hold_days=args.hold_days
         )
     else:
-        # 如果是跑实盘或单日预测，依旧沿用单日 date 参数
-        predict_daily(args.date, TRASH_POOL, DATA_PATH)
+        predict_daily(args.date, TRASH_POOL, DATA_PATH, hold_days=args.hold_days)
