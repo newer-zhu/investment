@@ -245,6 +245,244 @@ def generate_rebound_report_html(pool_date: str, result: pd.DataFrame, total_can
     return html
 
 
+def generate_trend_report_html(pool_date: str, result: pd.DataFrame, total_candidates: int) -> str:
+    """
+    生成趋势跟踪策略报告 HTML
+    """
+    num_selected = len(result)
+
+    # 格式化表格
+    display_cols = ['instrument', 'score', 'bias_5d', 'bias_20d', 'vol_ratio']
+    df_display = result.reset_index()[display_cols].copy()
+    df_display.columns = ['股票代码', '预测得分', '5日乖离率', '20日乖离率', '量比']
+
+    # 格式化数值
+    df_display['预测得分'] = df_display['预测得分'].round(4)
+    df_display['5日乖离率'] = (df_display['5日乖离率'] * 100).round(2).astype(str) + '%'
+    df_display['20日乖离率'] = (df_display['20日乖离率'] * 100).round(2).astype(str) + '%'
+    df_display['量比'] = df_display['量比'].round(2)
+
+    # 计算统计信息
+    avg_score = result['score'].mean() if not result.empty else 0
+    avg_bias_5d = result['bias_5d'].mean() if not result.empty else 0
+    avg_vol_ratio = result['vol_ratio'].mean() if not result.empty else 0
+
+    table_html = df_display.to_html(index=False, border=0, escape=False)
+
+    # HTML 模板
+    html = f"""
+    <!DOCTYPE html>
+    <html lang="zh-CN">
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>趋势跟踪策略报告</title>
+        <style>
+            body {{
+                font-family: 'Microsoft YaHei', 'PingFang SC', 'Hiragino Sans GB', sans-serif;
+                line-height: 1.6;
+                color: #333;
+                max-width: 800px;
+                margin: 0 auto;
+                padding: 20px;
+                background-color: #f8f9fa;
+            }}
+            .header {{
+                background: linear-gradient(135deg, #11998e 0%, #38ef7d 100%);
+                color: white;
+                padding: 30px;
+                border-radius: 10px;
+                text-align: center;
+                margin-bottom: 30px;
+                box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+            }}
+            .header h1 {{
+                margin: 0;
+                font-size: 28px;
+                font-weight: 300;
+            }}
+            .header p {{
+                margin: 10px 0 0 0;
+                opacity: 0.9;
+            }}
+            .summary {{
+                background: white;
+                padding: 25px;
+                border-radius: 8px;
+                margin-bottom: 25px;
+                box-shadow: 0 2px 4px rgba(0, 0, 0, 0.05);
+            }}
+            .summary h2 {{
+                color: #2c3e50;
+                border-bottom: 2px solid #27ae60;
+                padding-bottom: 10px;
+                margin-top: 0;
+            }}
+            .stats {{
+                display: flex;
+                justify-content: space-around;
+                margin: 20px 0;
+            }}
+            .stat {{
+                text-align: center;
+            }}
+            .stat .number {{
+                font-size: 32px;
+                font-weight: bold;
+                color: #27ae60;
+            }}
+            .stat .label {{
+                color: #7f8c8d;
+                font-size: 14px;
+                margin-top: 5px;
+            }}
+            .table-container {{
+                background: white;
+                border-radius: 8px;
+                overflow-x: auto;
+                box-shadow: 0 2px 4px rgba(0, 0, 0, 0.05);
+                margin-bottom: 20px;
+            }}
+            table {{
+                width: 100%;
+                border-collapse: collapse;
+            }}
+            th {{
+                background: linear-gradient(135deg, #11998e 0%, #38ef7d 100%);
+                color: white;
+                padding: 12px 8px;
+                text-align: center;
+                font-weight: 500;
+                font-size: 12px;
+                border: 1px solid #ddd;
+            }}
+            td {{
+                padding: 10px 8px;
+                text-align: center;
+                border-bottom: 1px solid #ecf0f1;
+                font-size: 12px;
+            }}
+            tr:nth-child(even) {{
+                background-color: #f8f9fa;
+            }}
+            tr:hover {{
+                background-color: #e8fdf5;
+                transition: background-color 0.2s;
+            }}
+            .footer {{
+                text-align: center;
+                margin-top: 30px;
+                color: #7f8c8d;
+                font-size: 12px;
+            }}
+            .performance-metrics {{
+                background: #f8f9fa;
+                padding: 15px;
+                border-radius: 6px;
+                margin-bottom: 20px;
+            }}
+            .performance-metrics h3 {{
+                margin-top: 0;
+                color: #2c3e50;
+                font-size: 16px;
+            }}
+            .metrics-grid {{
+                display: flex;
+                justify-content: space-between;
+                flex-wrap: wrap;
+                gap: 15px;
+            }}
+            .metric {{
+                display: flex;
+                flex-direction: column;
+                align-items: center;
+                background: white;
+                padding: 10px;
+                border-radius: 4px;
+                box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+                min-width: 120px;
+            }}
+            .metric-label {{
+                font-size: 12px;
+                color: #7f8c8d;
+                margin-bottom: 5px;
+            }}
+            .metric-value {{
+                font-size: 16px;
+                font-weight: bold;
+                color: #27ae60;
+            }}
+        </style>
+    </head>
+    <body>
+        <div class="header">
+            <h1>📈 趋势跟踪策略报告</h1>
+            <p>报告日期：{pool_date} | 生成时间：{pd.Timestamp.now().strftime('%Y-%m-%d %H:%M:%S')}</p>
+        </div>
+
+        <div class="summary">
+            <h2>📊 策略执行概况</h2>
+            <div class="stats">
+                <div class="stat">
+                    <div class="number">{total_candidates}</div>
+                    <div class="label">候选股票数</div>
+                </div>
+                <div class="stat">
+                    <div class="number">{num_selected}</div>
+                    <div class="label">入选股票数</div>
+                </div>
+                <div class="stat">
+                    <div class="number">{(num_selected/total_candidates*100):.1f}%</div>
+                    <div class="label">入选比例</div>
+                </div>
+            </div>
+
+            <div class="performance-metrics">
+                <h3>📈 入选股票统计</h3>
+                <div class="metrics-grid">
+                    <div class="metric">
+                        <span class="metric-label">平均预测得分:</span>
+                        <span class="metric-value">{avg_score:.4f}</span>
+                    </div>
+                    <div class="metric">
+                        <span class="metric-label">平均5日乖离率:</span>
+                        <span class="metric-value">{avg_bias_5d:.1%}</span>
+                    </div>
+                    <div class="metric">
+                        <span class="metric-label">平均量比:</span>
+                        <span class="metric-value">{avg_vol_ratio:.2f}</span>
+                    </div>
+                </div>
+            </div>
+
+            <div class="strategy-info">
+                <h3>🎯 策略逻辑说明</h3>
+                <p>基于 LightGBM 模型预测未来<strong>5日</strong>收益率，筛选动量延续的强势股。</p>
+                <ul>
+                    <li>✅ 5日乖离率 > 1%：股价位于均线上方，趋势向上</li>
+                    <li>✅ 量比 < 1.5：温和放量，非异常炒作</li>
+                    <li>✅ 20日乖离率辅助判断中期趋势</li>
+                    <li>✅ 追涨杀跌，买已经涨的赌继续涨</li>
+                </ul>
+            </div>
+        </div>
+
+        <div class="table-container">
+            <table>
+                {table_html}
+            </table>
+        </div>
+
+        <div class="footer">
+            <p>⚠️ 投资有风险，入市需谨慎。本报告仅供参考，不构成投资建议。</p>
+            <p>Generated by Qlib Quant Strategy Engine v2.0 | {pd.Timestamp.now().strftime('%Y-%m-%d %H:%M:%S')}</p>
+        </div>
+    </body>
+    </html>
+    """
+    return html
+
+
 def send_rebound_strategy_report(pool_date: str, result: pd.DataFrame, total_candidates: int, config_path: str):
     """
     发送超跌反弹策略报告邮件
