@@ -4,6 +4,7 @@ Email and report utilities for quantitative trading strategies
 import pandas as pd
 from pathlib import Path
 from qlib_project.utils.util import send_email, load_config_from_ini
+from qlib_project.constants import CONFIG_PATH
 
 
 def generate_rebound_report_html(pool_date: str, result: pd.DataFrame, total_candidates: int) -> str:
@@ -547,9 +548,8 @@ def test_send_email_functionality(project_root: Path):
     test_data = pd.read_csv(csv_path)
 
     # 加载邮件配置
-    config_path = project_root.parent.parent.parent / "config.ini"  # /mnt/f/Code/investment/config.ini
-    print(f"🔍 测试配置文件路径: {config_path}")
-    _email_cfg = load_config_from_ini("email", str(config_path))
+    print(f"🔍 测试配置文件路径: {CONFIG_PATH}")
+    _email_cfg = load_config_from_ini("email", str(CONFIG_PATH))
 
     print(f"📧 测试邮件配置 - 发件人: {_email_cfg.get('from_email', '')}")
     print(f"📧 测试邮件配置 - 密码: {_email_cfg.get('from_password', '')[:4]}****")

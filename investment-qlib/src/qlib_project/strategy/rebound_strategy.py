@@ -21,16 +21,17 @@ for path in (str(BASE_DIR), str(PROJECT_ROOT), str(SRC_ROOT)):
     if path not in sys.path:
         sys.path.insert(0, path)
 
-from qlib_project.constants import TRASH_POOL, BASE_POOL, DATA_PATH
+from qlib_project.constants import (
+    TRASH_POOL, BASE_POOL, DATA_PATH, CONFIG_PATH,
+    REBOUND_MODEL_DIR, REBOUND_MODEL_FILE, REBOUND_FEATURE_FILE,
+    REBOUND_SIGNAL_FILE, REBOUND_PREDICTIONS_DIR,
+)
 from qlib_project.utils.util import load_stock_pool, send_email, load_config_from_ini
 from qlib_project.utils.email_report_utils import generate_rebound_report_html
 from qlib_project.utils.backend_score_sender import build_backend_records_from_result, save_scores_to_backend
 
 # ================== 存储路径 ==================
-MODEL_DIR = PROJECT_ROOT / "data" / "models" / "rebound"
-MODEL_DIR.mkdir(parents=True, exist_ok=True)
-MODEL_FILE = MODEL_DIR / "lgb_rebound_model.pkl"
-FEATURE_FILE = MODEL_DIR / "rebound_refined_features.json"
+REBOUND_MODEL_DIR.mkdir(parents=True, exist_ok=True)
 
 # ================== 共享因子表达式 (Handler 与 predict_daily 共用，避免重复定义) ==================
 _REBOUND_EXTRA_FIELDS = [
@@ -288,12 +289,11 @@ def train_weekly(test_start_date: str, test_end_date: str, stock_pool: list, dat
     test_pred = final_model.predict(ds_final, segment="test")
     if isinstance(test_pred, pd.Series): test_pred = test_pred.to_frame("score")
         
-    SIGNAL_FILE = MODEL_FILE.parent / "lgb_rebound_pred.pkl"
     print(f"📊 预测信号生成完毕，总行数: {len(test_pred)}")
     
-    test_pred.to_pickle(str(SIGNAL_FILE))
-    final_model.to_pickle(str(MODEL_FILE))
-    with open(FEATURE_FILE, 'w', encoding='utf-8') as f:
+    test_pred.to_pickle(str(REBOUND_SIGNAL_FILE))
+    final_model.to_pickle(str(REBOUND_MODEL_FILE))
+    with open(REBOUND_FEATURE_FILE, 'w', encoding='utf-8') as f:
         json.dump({"fields": refined_fields, "names": refined_names}, f, ensure_ascii=False)
     
     print(f"✅ 模型与信号全部训练准备完成！\n")
@@ -314,14 +314,14 @@ def predict_daily(pool_date: str, stock_pool: list, data_path: str, hold_days: i
             # return pd.DataFrame() # 根据你的风险偏好决定是否强制中断
 
     # 2. 加载
-    if not MODEL_FILE.exists():
+    if not REBOUND_MODEL_FILE.exists():
         print("❌ 模型文件不存在。")
         return pd.DataFrame()
 
-    with open(FEATURE_FILE, 'r', encoding='utf-8') as f:
+    with open(REBOUND_FEATURE_FILE, 'r', encoding='utf-8') as f:
         feat_conf = json.load(f)
     
-    model = LGBModel.load(MODEL_FILE)
+    model = LGBModel.load(REBOUND_MODEL_FILE)
 
     # 3. 预测
     lookback = (pd.Timestamp(pool_date) - pd.Timedelta(days=120)).strftime('%Y-%m-%d')
@@ -393,17 +393,15 @@ def predict_daily(pool_date: str, stock_pool: list, data_path: str, hold_days: i
             print(f"⚠️ 后端批量保存未成功: {backend_response.get('message', 'unknown error')}")
 
         # 保存结果
-        RESULT_DIR = PROJECT_ROOT / "data" / "rebound_predictions"
-        RESULT_DIR.mkdir(parents=True, exist_ok=True)
-        result_path = RESULT_DIR / f"rebound_picks_{pool_date}.csv"
+        REBOUND_PREDICTIONS_DIR.mkdir(parents=True, exist_ok=True)
+        result_path = REBOUND_PREDICTIONS_DIR / f"rebound_picks_{pool_date}.csv"
         result.to_csv(result_path)
         print(f"💾 结果已保存至: {result_path}")
         
         # 发送邮件报告
         try:
-            config_path = PROJECT_ROOT.parent.parent.parent / "config.ini"  # /mnt/f/Code/investment/config.ini
-            print(f"🔍 配置文件路径: {config_path}")
-            _email_cfg = load_config_from_ini("email", str(config_path))
+            print(f"🔍 配置文件路径: {CONFIG_PATH}")
+            _email_cfg = load_config_from_ini("email", str(CONFIG_PATH))
             TO_EMAILS = [e.strip() for e in _email_cfg.get("to_emails", "").split(",") if e.strip()] or [_email_cfg.get("to_email", "")]
             FROM_EMAIL = _email_cfg.get("from_email", "")
             FROM_PASSWORD = _email_cfg.get("from_password", "")
@@ -622,10 +620,9 @@ def roll_train(
     final_pred = final_pred[~final_pred.index.duplicated(keep='first')]
     final_pred = final_pred.sort_index()
 
-    SIGNAL_FILE = MODEL_FILE.parent / "lgb_rebound_pred.pkl"
-    final_pred.to_pickle(str(SIGNAL_FILE))
+    final_pred.to_pickle(str(REBOUND_SIGNAL_FILE))
     print(f"\n{'='*60}")
-    print(f"✅ 滚动训练完成！累计 {len(final_pred)} 条信号 → {SIGNAL_FILE}")
+    print(f"✅ 滚动训练完成！累计 {len(final_pred)} 条信号 → {REBOUND_SIGNAL_FILE}")
     print(f"{'='*60}")
 
 

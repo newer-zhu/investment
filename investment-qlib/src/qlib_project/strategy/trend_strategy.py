@@ -20,16 +20,16 @@ for path in (str(BASE_DIR), str(PROJECT_ROOT), str(SRC_ROOT)):
     if path not in sys.path:
         sys.path.insert(0, path)
 
-from qlib_project.constants import DATA_PATH
+from qlib_project.constants import (
+    DATA_PATH, CONFIG_PATH, TREND_POOL,
+    TREND_MODEL_DIR, TREND_MODEL_FILE, TREND_FEATURE_FILE,
+    TREND_SIGNAL_FILE, TREND_PREDICTIONS_DIR,
+)
 from qlib_project.utils.util import load_stock_pool, send_email, load_config_from_ini
 from qlib_project.utils.email_report_utils import generate_trend_report_html
 from qlib_project.utils.backend_score_sender import build_backend_records_from_result, save_scores_to_backend
 
-TREND_POOL = DATA_PATH / "instruments" / "my_trend_pool.txt"
-MODEL_DIR = PROJECT_ROOT / "data" / "models" / "trend"
-MODEL_DIR.mkdir(parents=True, exist_ok=True)
-MODEL_FILE = MODEL_DIR / "lgb_trend_model.pkl"
-FEATURE_FILE = MODEL_DIR / "trend_refined_features.json"
+TREND_MODEL_DIR.mkdir(parents=True, exist_ok=True)
 
 _qlib_initialized = False
 
@@ -413,9 +413,8 @@ def roll_train(test_start, test_end, stock_pool_path, data_path, hold_days=5):
     final_pred = pd.concat(all_predictions)
     final_pred = final_pred[~final_pred.index.duplicated(keep='first')].sort_index()
 
-    SIGNAL_FILE = MODEL_FILE.parent / "lgb_trend_pred.pkl"
-    final_pred.to_pickle(str(SIGNAL_FILE))
-    print(f"\n✅ 趋势滚动训练完成: {len(final_pred)} 条 → {SIGNAL_FILE}")
+    final_pred.to_pickle(str(TREND_SIGNAL_FILE))
+    print(f"\n✅ 趋势滚动训练完成: {len(final_pred)} 条 → {TREND_SIGNAL_FILE}")
 
 
 if __name__ == "__main__":
@@ -437,13 +436,13 @@ if __name__ == "__main__":
         stock_in = load_stock_pool(TREND_POOL)
         print(f"\n📈 趋势预测 ({args.date}), 股票池: {len(stock_in)} 只")
 
-        if not MODEL_FILE.exists():
+        if not TREND_MODEL_FILE.exists():
             print("❌ 模型不存在，请先训练: python trend_strategy.py --mode=train")
         else:
-            model = LGBModel.load(MODEL_FILE)
+            model = LGBModel.load(TREND_MODEL_FILE)
             feat_conf = None
-            if FEATURE_FILE.exists():
-                with open(FEATURE_FILE, 'r') as f:
+            if TREND_FEATURE_FILE.exists():
+                with open(TREND_FEATURE_FILE, 'r') as f:
                     feat_conf = json.load(f)
 
             lookback = (pd.Timestamp(args.date) - pd.Timedelta(days=120)).strftime('%Y-%m-%d')
@@ -490,10 +489,9 @@ if __name__ == "__main__":
                 print(result[['score', 'bias_5d', 'bias_20d', 'vol_ratio']].to_string())
 
                 # 保存
-                out_dir = PROJECT_ROOT / "data" / "trend_predictions"
-                out_dir.mkdir(parents=True, exist_ok=True)
-                result.to_csv(out_dir / f"trend_picks_{args.date}.csv")
-                print(f"\n💾 已保存至: {out_dir / f'trend_picks_{args.date}.csv'}")
+                TREND_PREDICTIONS_DIR.mkdir(parents=True, exist_ok=True)
+                result.to_csv(TREND_PREDICTIONS_DIR / f"trend_picks_{args.date}.csv")
+                print(f"\n💾 已保存至: {TREND_PREDICTIONS_DIR / f'trend_picks_{args.date}.csv'}")
 
                 # 后端批量保存
                 backend_records = build_backend_records_from_result(result, args.date)
@@ -505,9 +503,8 @@ if __name__ == "__main__":
 
                 # 发送邮件报告
                 try:
-                    config_path = PROJECT_ROOT.parent.parent.parent / "config.ini"
-                    print(f"🔍 配置文件路径: {config_path}")
-                    _email_cfg = load_config_from_ini("email", str(config_path))
+                    print(f"🔍 配置文件路径: {CONFIG_PATH}")
+                    _email_cfg = load_config_from_ini("email", str(CONFIG_PATH))
                     TO_EMAILS = [e.strip() for e in _email_cfg.get("to_emails", "").split(",") if e.strip()] or [_email_cfg.get("to_email", "")]
                     FROM_EMAIL = _email_cfg.get("from_email", "")
                     FROM_PASSWORD = _email_cfg.get("from_password", "")
@@ -544,7 +541,6 @@ if __name__ == "__main__":
         test_pred, model = train_once(
             args.test_start, args.test_end, TREND_POOL, DATA_PATH, args.hold_days
         )
-        SIGNAL_FILE = MODEL_FILE.parent / "lgb_trend_pred.pkl"
-        test_pred.to_pickle(str(SIGNAL_FILE))
-        model.to_pickle(str(MODEL_FILE))
+        test_pred.to_pickle(str(TREND_SIGNAL_FILE))
+        model.to_pickle(str(TREND_MODEL_FILE))
         print(f"\n✅ 模型和信号已保存")
