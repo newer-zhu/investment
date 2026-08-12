@@ -1,17 +1,45 @@
 from pathlib import Path
 
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
-# 数据根路径
-SOURCE_PATH = PROJECT_ROOT / "data" 
+PROJECT_ROOT = Path(__file__).resolve().parents[2]   # investment-qlib/
+REPO_ROOT = PROJECT_ROOT.parent                       # investment/ (repo root)
+
+# ================== 配置文件 ==================
+CONFIG_PATH = REPO_ROOT / "config.ini"
+
+# ================== 数据根路径 ==================
+SOURCE_PATH = PROJECT_ROOT / "data"
 # 量价数据路径
 DATA_PATH = PROJECT_ROOT / "data" / "source" / "qlib_bin"
-FINANCE_PATH = PROJECT_ROOT / "data" / "source"  / "finance"
+FINANCE_PATH = PROJECT_ROOT / "data" / "source" / "finance"
 
+# ================== 股票池文件 ==================
 FILTERED_POOL = DATA_PATH / "instruments" / "my_filtered_pool.txt"
 TRASH_POOL = DATA_PATH / "instruments" / "my_trash_pool.txt"
 # 基础池: 仅主板+行业过滤（不含动态量价过滤），用于滚动训练的每周刷新
 BASE_POOL = DATA_PATH / "instruments" / "my_base_pool.txt"
-TUSHARE_TOKEN= "2f80f707c09dc4ce6c59eb215739349f7a203485b19b4401a683bb6549ec"
+TREND_POOL = DATA_PATH / "instruments" / "my_trend_pool.txt"
+
+# ================== 模型存储 ==================
+MODELS_DIR = PROJECT_ROOT / "data" / "models"
+TREND_MODEL_DIR = MODELS_DIR / "trend"
+REBOUND_MODEL_DIR = MODELS_DIR / "rebound"
+
+# 趋势策略
+TREND_MODEL_FILE = TREND_MODEL_DIR / "lgb_trend_model.pkl"
+TREND_FEATURE_FILE = TREND_MODEL_DIR / "trend_refined_features.json"
+TREND_SIGNAL_FILE = TREND_MODEL_DIR / "lgb_trend_pred.pkl"
+
+# 反弹策略
+REBOUND_MODEL_FILE = REBOUND_MODEL_DIR / "lgb_rebound_model.pkl"
+REBOUND_FEATURE_FILE = REBOUND_MODEL_DIR / "rebound_refined_features.json"
+REBOUND_SIGNAL_FILE = REBOUND_MODEL_DIR / "lgb_rebound_pred.pkl"
+
+# ================== 预测结果输出 ==================
+TREND_PREDICTIONS_DIR = PROJECT_ROOT / "data" / "trend_predictions"
+REBOUND_PREDICTIONS_DIR = PROJECT_ROOT / "data" / "rebound_predictions"
+
+# ================== API Token ==================
+TUSHARE_TOKEN = "2f80f707c09dc4ce6c59eb215739349f7a203485b19b4401a683bb6549ec"
 
 TECH_KEYWORDS = [
     # 1. 硬科技（半导体、先进制造与材料）

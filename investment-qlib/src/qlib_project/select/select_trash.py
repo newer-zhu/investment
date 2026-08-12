@@ -20,15 +20,14 @@ for path in (str(BASE_DIR), str(PROJECT_ROOT), str(SRC_ROOT)):
         sys.path.insert(0, path)
 
 try:
-    from constants import DATA_PATH
+    from constants import DATA_PATH, TRASH_POOL
     from utils.api import get_industry_by_code
     from utils.util import is_industry, qlib_to_tushare
 except ImportError:
-    from qlib_project.constants import DATA_PATH
+    from qlib_project.constants import DATA_PATH, TRASH_POOL
     from qlib_project.utils.api import get_industry_by_code
     from qlib_project.utils.util import is_industry, qlib_to_tushare
 
-OUTPUT_PATH = DATA_PATH / "instruments" / "my_trash_pool.txt"
 
 
 # ================= 主板过滤 =================
@@ -307,13 +306,13 @@ def main():
     # ==========================================================
     if codes:
 
-        OUTPUT_PATH.parent.mkdir(
+        TRASH_POOL.parent.mkdir(
             parents=True,
             exist_ok=True
         )
 
         with open(
-            OUTPUT_PATH,
+            TRASH_POOL,
             "w",
             encoding="utf-8"
         ) as f:
@@ -324,7 +323,7 @@ def main():
         print(
             f"✅ 筛选完成: "
             f"{len(codes)} 只股票 "
-            f"已保存至:\n{OUTPUT_PATH}"
+            f"已保存至:\n{TRASH_POOL}"
         )
 
     else:

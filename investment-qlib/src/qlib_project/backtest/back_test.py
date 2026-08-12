@@ -16,9 +16,9 @@ for path in (str(BASE_DIR), str(PROJECT_ROOT), str(SRC_ROOT)):
     if path not in sys.path:
         sys.path.insert(0, path)
 try:
-    from constants import DATA_PATH
+    from constants import DATA_PATH, TREND_SIGNAL_FILE, REBOUND_SIGNAL_FILE
 except ImportError:
-    from qlib_project.constants import DATA_PATH
+    from qlib_project.constants import DATA_PATH, TREND_SIGNAL_FILE, REBOUND_SIGNAL_FILE
 
 class ReboundHoldStrategy(BaseStrategy):
     """
@@ -252,9 +252,9 @@ if __name__ == "__main__":
     if args.pred:
         PRED_PATH = Path(args.pred)
     elif args.strategy == "trend":
-        PRED_PATH = PROJECT_ROOT / "data" / "models" / "trend" / "lgb_trend_pred.pkl"
+        PRED_PATH = TREND_SIGNAL_FILE
     else:
-        PRED_PATH = PROJECT_ROOT / "data" / "models" / "rebound" / "lgb_rebound_pred.pkl"
+        PRED_PATH = REBOUND_SIGNAL_FILE
 
     qlib.init(provider_uri=str(DATA_PATH), region="cn")
 

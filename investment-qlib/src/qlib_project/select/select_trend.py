@@ -21,11 +21,9 @@ for path in (str(BASE_DIR), str(PROJECT_ROOT), str(SRC_ROOT)):
         sys.path.insert(0, path)
 
 try:
-    from constants import DATA_PATH
+    from constants import DATA_PATH, TREND_POOL
 except ImportError:
-    from qlib_project.constants import DATA_PATH
-
-OUTPUT_PATH = DATA_PATH / "instruments" / "my_trend_pool.txt"
+    from qlib_project.constants import DATA_PATH, TREND_POOL
 
 _MAINBOARD_RE = re.compile(
     r'^SH[69](?!88|89)\d{5}$'
@@ -118,11 +116,11 @@ def main():
     print(f"趋势筛选后: {len(codes)} 只")
 
     if codes:
-        OUTPUT_PATH.parent.mkdir(parents=True, exist_ok=True)
-        with open(OUTPUT_PATH, "w", encoding="utf-8") as f:
+        TREND_POOL.parent.mkdir(parents=True, exist_ok=True)
+        with open(TREND_POOL, "w", encoding="utf-8") as f:
             for code in sorted(codes):
                 f.write(f"{code}\n")
-        print(f"✅ 趋势池已保存: {OUTPUT_PATH}")
+        print(f"✅ 趋势池已保存: {TREND_POOL}")
 
 
 if __name__ == "__main__":
