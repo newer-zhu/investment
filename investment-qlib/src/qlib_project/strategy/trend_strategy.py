@@ -41,6 +41,19 @@ def _ensure_qlib_init(data_path=None):
         _qlib_initialized = True
 
 
+def _limit_up_threshold(code: str) -> float:
+    """按板块返回涨停涨幅阈值(留少量舍入余量)"""
+    c = code.upper()
+    # 创业板 / 科创板: 20%
+    if c.startswith(("SZ300", "SZ301", "SH688", "SH689")):
+        return 0.198
+    # 北交所: 30%
+    if c.startswith(("BJ4", "BJ8", "BJ9")):
+        return 0.298
+    # 主板(60/00/001/002/003): 10%
+    return 0.098
+
+
 # ================== 纯动量 Feature Handler ==================
 # 不再继承 Alpha158（含大量均值回归因子如 RSV/RANK/RSI/SUMP）,
 # 改为直接继承 DataHandlerLP，只使用动量/趋势类因子。
@@ -434,6 +447,20 @@ if __name__ == "__main__":
         # ===== 单日预测模式 =====
         _ensure_qlib_init()
         stock_in = load_stock_pool(TREND_POOL)
+        # 数据源可能滞后: 指定日期未必已入库(如日期在日历中但特征数据缺失)。
+        # 回退到最近有特征数据的交易日, 避免取空数据导致推荐失效。
+        _cal = D.calendar()
+        _target = pd.Timestamp(args.date)
+        _recent = [d for d in _cal if d <= _target][-5:]
+        if not _recent:
+            _recent = list(_cal)[-5:]
+        for _day in reversed(_recent):
+            _probe = D.features(stock_in[:20], ["$close"], start_time=_day, end_time=_day)
+            if _probe is not None and not _probe.empty:
+                if _day != _target:
+                    print(f"⚠️ {args.date} 无特征数据, 回退到 {_day.date()}")
+                args.date = _day.strftime('%Y-%m-%d')
+                break
         print(f"\n📈 趋势预测 ({args.date}), 股票池: {len(stock_in)} 只")
 
         if not TREND_MODEL_FILE.exists():
@@ -464,13 +491,15 @@ if __name__ == "__main__":
             scores = scores.set_index('instrument')
 
             # 行情风控: D.features 获取当天的乖离、量比、上影线
+            # 含真实日涨幅(ret_real, 用 factor 还原实际价), 用于剔除涨停/一字板
             risk_fields = [
                 "$close / Mean($close, 5) - 1",
                 "$close / Mean($close, 20) - 1",
                 "$amount / Mean($amount, 5)",
                 "($high - $close) / $close",
+                "($close / Ref($close, 1)) * (Ref($factor, 1) / $factor) - 1",
             ]
-            risk_names = ["bias_5d", "bias_20d", "vol_ratio", "upper_shadow"]
+            risk_names = ["bias_5d", "bias_20d", "vol_ratio", "upper_shadow", "ret_real"]
             risk_df = D.features(stock_in, risk_fields, start_time=args.date, end_time=args.date)
             if not risk_df.empty:
                 risk_df.columns = risk_names
@@ -480,7 +509,11 @@ if __name__ == "__main__":
                     risk_df = risk_df.xs(pd.Timestamp(args.date), level=1)
                 risk_df.index = risk_df.index.astype(str).str.upper().str.strip()
 
-                final = scores[['score']].join(risk_df[['bias_5d', 'bias_20d', 'vol_ratio']], how='inner')
+                final = scores[['score']].join(risk_df[['bias_5d', 'bias_20d', 'vol_ratio', 'ret_real']], how='inner')
+                # 剔除无法买入的标的: 当日收盘涨停/一字板(次日开盘大概率顶一字, 买不进)
+                _lim = final.index.map(_limit_up_threshold)
+                _lim = pd.Series(_lim.values, index=final.index)
+                final = final[final['ret_real'] < (_lim - 0.002)]
                 # 趋势筛选：5日乖离为正（多头）+ 放量确认（1.2~5倍均量，剔除无量跟风和极端爆量）
                 candidates = final[(final['bias_5d'] > 0) & (final['vol_ratio'] > 1.2) & (final['vol_ratio'] < 5.0)]
                 result = candidates.sort_values('score', ascending=False).head(args.topk)
@@ -536,6 +569,8 @@ if __name__ == "__main__":
                     print(f"❌ 邮件发送失败: {e}")
             else:
                 print("❌ 无法获取行情数据")
+                print(f"   说明: qlib D.features 返回空数据；risk_df.shape={risk_df.shape}")
+                print("   可能原因: 该日期在当前数据源中缺少行情，或股票池当天无可用标的。")
     else:
         # train mode
         test_pred, model = train_once(

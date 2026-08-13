@@ -1,0 +1,10 @@
+# Additional runtime dependencies for investment-qlib
+# Install these into your `qlib_env` if missing
+akshare>=1.17.87
+catboost
+xgboost
+torch
+
+# Optional: add other heavy ML libs if you plan to use them
+# pytorch-lightning
+# torchvision

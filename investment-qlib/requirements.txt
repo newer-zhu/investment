@@ -7,3 +7,5 @@ jupyterlab
 lightgbm
 tensorflow
 torch
+akshare==1.18.84
+holidays==0.83

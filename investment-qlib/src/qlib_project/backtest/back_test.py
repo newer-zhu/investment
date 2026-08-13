@@ -20,6 +20,20 @@ try:
 except ImportError:
     from qlib_project.constants import DATA_PATH, TREND_SIGNAL_FILE, REBOUND_SIGNAL_FILE
 
+
+def _limit_up_threshold(code: str) -> float:
+    """按板块返回涨停涨幅阈值(留少量舍入余量)"""
+    c = code.upper()
+    # 创业板 / 科创板: 20%
+    if c.startswith(("SZ300", "SZ301", "SH688", "SH689")):
+        return 0.198
+    # 北交所: 30%
+    if c.startswith(("BJ4", "BJ8", "BJ9")):
+        return 0.298
+    # 主板(60/00/001/002/003): 10%
+    return 0.098
+
+
 class ReboundHoldStrategy(BaseStrategy):
     """
     超跌反弹持仓策略（可配置持仓天数）
@@ -37,17 +51,21 @@ class ReboundHoldStrategy(BaseStrategy):
     """
     
     def __init__(self, signal, topk=5, bias_limit=0.05, stop_loss=-0.08,
-                 max_positions=6, signal_max_age=5, hold_days=5,
-                 use_market_filter=True, trend_mode=False, **kwargs):
+                 take_profit=0.10, trend_exit=True, max_positions=6,
+                 signal_max_age=5, hold_days=5, use_market_filter=True,
+                 trend_mode=False, min_price=1.0, **kwargs):
         self.signal = signal
         self.topk = topk
         self.bias_limit = bias_limit
         self.stop_loss = stop_loss
+        self.take_profit = take_profit          # 止盈: 盈利达到阈值即卖出
+        self.trend_exit = trend_exit            # 趋势破坏退出(跌破MA5)
         self.max_positions = max_positions
         self.signal_max_age = signal_max_age
         self.hold_days = hold_days
         self.use_market_filter = use_market_filter
         self.trend_mode = trend_mode            # True=趋势追涨, False=超跌反弹
+        self.min_price = min_price
         self.holding_days = {}
         self.entry_prices = {}
         self.last_update_date = None
@@ -66,19 +84,40 @@ class ReboundHoldStrategy(BaseStrategy):
     def generate_trade_decision(self, execute_result=None):
         trade_date, _ = self.trade_calendar.get_step_time()
         trade_date_str = pd.Timestamp(trade_date).strftime('%Y-%m-%d')
-        
         order_list = []
-        current_holdings = self.get_current_holdings()
-        
+
         # ==========================================
-        # 🔒 日期锁：防止同一天被 Qlib 重复调用
+        # 1️⃣ 按上一日「实际成交」更新持仓天数与成本
+        #    只把真正成交的买卖入账——杜绝"涨停拒买/跌停拒卖"造成的
+        #    幻影持仓与重复卖出(qlib 的 check_stock_limit 会拒绝涨跌停订单)
+        # ==========================================
+        if execute_result is not None:
+            for item in execute_result:
+                if not isinstance(item, (tuple, list)) or len(item) < 4:
+                    continue
+                order, _val, _cost, trade_price = item[:4]
+                deal = getattr(order, "deal_amount", 0) or 0
+                if deal <= 1e-5:
+                    continue  # 未成交(涨停拒买/跌停拒卖/资金不足) → 不入账
+                stock_id = order.stock_id
+                if order.direction == OrderDir.BUY:
+                    self.holding_days[stock_id] = 0          # 建仓/加仓, 天数归零
+                    self.entry_prices[stock_id] = trade_price  # 真实成交价
+                elif order.direction == OrderDir.SELL:
+                    # 卖出成交 → 清掉该股记录
+                    self.holding_days.pop(stock_id, None)
+                    self.entry_prices.pop(stock_id, None)
+
+        current_holdings = self.get_current_holdings()
+
+        # ==========================================
+        # 2️⃣ 每日递增持有天数 + 清理已离场记录(同日只处理一次)
         # ==========================================
         if self.last_update_date != trade_date_str:
             for stock in list(self.holding_days.keys()):
                 if stock not in current_holdings:
-                    del self.holding_days[stock]
-                    self.entry_prices.pop(stock, None)  # 清理已清仓的成本记录
-            
+                    self.holding_days.pop(stock, None)
+                    self.entry_prices.pop(stock, None)
             for stock in current_holdings.keys():
                 if stock not in self.holding_days:
                     self.holding_days[stock] = 0
@@ -87,41 +126,50 @@ class ReboundHoldStrategy(BaseStrategy):
             self.last_update_date = trade_date_str
 
         # ==========================================
-        # 🛑 卖出逻辑 1：hold_days 到期卖出
+        # 3️⃣ 卖出决策: 到期 / 止损 / 止盈 / 趋势破坏
         # ==========================================
+        prices_df = pd.DataFrame()
+        if current_holdings:
+            _p = D.features(list(current_holdings.keys()),
+                            ["$close", "$close / Mean($close, 5) - 1"],
+                            start_time=trade_date, end_time=trade_date)
+            if _p is not None and not _p.empty:
+                # 注意: D.features 返回 MultiIndex (instrument, datetime),
+                # 不能 reset_index(level=0) 否则删掉 instrument 层, 卖出逻辑全部失效
+                _p = _p.reset_index()
+                _p["instrument"] = _p["instrument"].astype(str).str.upper()
+                _field_cols = _p.columns.difference(["instrument", "datetime"])
+                _p = _p.rename(columns=dict(zip(_field_cols, ["price", "bias_5d"])))
+                prices_df = _p.set_index("instrument")[["price", "bias_5d"]]
+
         stocks_to_sell = set()
-        for stock, days in list(self.holding_days.items()):
+        for stock, amount in current_holdings.items():
+            if stock not in prices_df.index:
+                continue  # 当日无行情, 跳过
+            price = prices_df.loc[stock, "price"]
+            if not np.isfinite(price) or price <= 0:
+                continue
+            days = self.holding_days.get(stock, 0)
+            entry = self.entry_prices.get(stock)
+            pnl = (price / entry - 1) if entry else 0.0
+
+            reason = None
             if days >= self.hold_days:
-                amount = current_holdings.get(stock, 0)
-                if amount > 0:
-                    order_list.append(OrderHelper.create(code=stock, amount=amount, direction=OrderDir.SELL))
-                    stocks_to_sell.add(stock)
-                    print(f"[{trade_date_str}] 🔴 T+{self.hold_days} 到期卖出: {stock} ({amount} 股)")
+                reason = f"T+{self.hold_days}到期"
+            elif entry and pnl <= self.stop_loss:
+                reason = "止损"
+            elif entry and pnl >= self.take_profit:
+                reason = "止盈"
+            elif self.trend_exit and self.trend_mode and prices_df.loc[stock, "bias_5d"] < 0:
+                reason = "趋势破坏"
+
+            if reason:
+                stocks_to_sell.add(stock)
+                order_list.append(OrderHelper.create(code=stock, amount=amount, direction=OrderDir.SELL))
+                print(f"[{trade_date_str}] 🔴 卖出({reason}): {stock} ({amount:.0f}股, 盈亏={pnl:+.2%})")
 
         # ==========================================
-        # 🛑 卖出逻辑 2：止损（持仓亏损 > 阈值）
-        # ==========================================
-        all_held = [s for s in current_holdings if s not in stocks_to_sell]
-        if all_held:
-            prices_df = D.features(all_held, ["$close"], start_time=trade_date, end_time=trade_date)
-            if not prices_df.empty:
-                if isinstance(prices_df.index, pd.MultiIndex):
-                    prices_df = prices_df.reset_index(level=0, drop=True)
-                for stock in all_held:
-                    entry = self.entry_prices.get(stock)
-                    if entry is None or stock not in prices_df.index:
-                        continue
-                    current_price = prices_df.loc[stock].iloc[0] if hasattr(prices_df.loc[stock], 'iloc') else prices_df.loc[stock]
-                    pnl = (current_price / entry - 1)
-                    if pnl < self.stop_loss:
-                        amount = current_holdings[stock]
-                        order_list.append(OrderHelper.create(code=stock, amount=amount, direction=OrderDir.SELL))
-                        stocks_to_sell.add(stock)
-                        self.entry_prices.pop(stock, None)
-                        print(f"[{trade_date_str}] 🛑 止损卖出: {stock} (亏损 {pnl:.2%}, 买入={entry:.2f}, 现价={current_price:.2f})")
-
-        # ==========================================
-        # 🟢 买入逻辑：大盘风控 + 信号时效 + 量比 + 自适应bias
+        # 4️⃣ 买入逻辑
         # ==========================================
         # --- 大盘 MA20 风控（同一天只查一次） ---
         if self.use_market_filter and self.last_update_date != trade_date_str:
@@ -135,66 +183,68 @@ class ReboundHoldStrategy(BaseStrategy):
             print(f"[{trade_date_str}] ⚠️ 大盘在 MA20 下方，暂停买入")
             return TradeDecisionWO(order_list, self)
 
-        # 检查当前持仓数，已达上限则跳过买入
         active_positions = len([s for s in current_holdings if s not in stocks_to_sell])
         if active_positions >= self.max_positions:
             print(f"[{trade_date_str}] ⏸️ 持仓已达上限 {self.max_positions}，跳过买入")
             return TradeDecisionWO(order_list, self)
 
+        # --- 信号时效 ---
         signal_dates = pd.to_datetime(self.signal.index.get_level_values('datetime'))
         signal_date_strs = signal_dates.strftime('%Y-%m-%d')
-        
         valid_mask = signal_date_strs <= trade_date_str
         if not valid_mask.any():
             return TradeDecisionWO(order_list, self)
-            
         latest_signal_date = signal_date_strs[valid_mask].max()
-        
-        # 🕐 信号新鲜度检查（日历日，应 >= 重训周期）
-        # 周度重训 → signal_max_age=10 日历日覆盖周末+缓冲
         signal_age = (pd.Timestamp(trade_date_str) - pd.Timestamp(latest_signal_date)).days
         if signal_age > self.signal_max_age:
             print(f"[{trade_date_str}] ⚠️ 最新信号过期 ({latest_signal_date}, {signal_age}天前, 上限{self.signal_max_age}天)，跳过买入")
             return TradeDecisionWO(order_list, self)
 
         current_scores = self.signal[signal_date_strs == latest_signal_date]
-
         if current_scores.empty:
             return TradeDecisionWO(order_list, self)
-
         if isinstance(current_scores, pd.DataFrame):
             current_scores = current_scores['score'] if 'score' in current_scores.columns else current_scores.iloc[:, 0]
 
         instruments = current_scores.index.get_level_values('instrument').unique().tolist()
-        
-        # 获取行情数据（收盘价，与模型预测目标对齐）
+
+        # 行情: 5日乖离 / 收盘 / 量比 / 真实日涨幅(涨停检测)
         features_df = D.features(
             instruments,
-            ["$close / Mean($close, 5) - 1", "$close", "$amount / Mean($amount, 5)"],
-            start_time=trade_date, end_time=trade_date
+            [
+                "$close / Mean($close, 5) - 1",
+                "$close",
+                "$amount / Mean($amount, 5)",
+                "($close / Ref($close, 1)) * (Ref($factor, 1) / $factor) - 1",
+            ],
+            start_time=trade_date, end_time=trade_date,
         )
-        
         if features_df.empty:
             return TradeDecisionWO(order_list, self)
 
-        features_df.columns = ['bias_5d', 'close_price', 'vol_ratio']
+        features_df.columns = ['bias_5d', 'close_price', 'vol_ratio', 'ret_real']
         features_df = features_df.reset_index()
         features_df['instrument'] = features_df['instrument'].astype(str).str.upper()
-        features_df = features_df.set_index('instrument')[['bias_5d', 'close_price', 'vol_ratio']]
-        
+        features_df = features_df.set_index('instrument')[['bias_5d', 'close_price', 'vol_ratio', 'ret_real']]
+
         current_scores_single = current_scores.reset_index()
         current_scores_single['instrument'] = current_scores_single['instrument'].astype(str).str.upper()
         current_scores_single = current_scores_single.set_index('instrument')['score']
-        
+
         combined = pd.DataFrame({'score': current_scores_single}).join(features_df, how='inner')
 
-        # --- 过滤逻辑（趋势/反弹自适应） ---
-        # 1. 质量门
-        candidates = combined[(combined['close_price'] > 0) & (combined['vol_ratio'] < 1.5)].copy()
+        # --- 质量门: 价格下限 + 量比 + 剔除当日涨停/一字板(买不进) ---
+        _lim = combined.index.map(_limit_up_threshold)
+        _lim = pd.Series(_lim.values, index=combined.index)
+        candidates = combined[
+            (combined['close_price'] > self.min_price) &
+            (combined['vol_ratio'] < 1.5) &
+            (combined['ret_real'] < (_lim - 0.002))
+        ].copy()
         if candidates.empty:
             return TradeDecisionWO(order_list, self)
 
-        # 2. 自适应分位 + 方向切换
+        # --- 自适应分位 + 方向切换 ---
         quantile_threshold = candidates['bias_5d'].quantile(0.30)
         effective_limit = min(quantile_threshold, self.bias_limit)
 
@@ -207,31 +257,27 @@ class ReboundHoldStrategy(BaseStrategy):
             safe_stocks = candidates[candidates['bias_5d'] < effective_limit]
 
         current_scores = safe_stocks['score'].dropna().sort_values(ascending=False)
-        close_prices = safe_stocks['close_price']
-
         topk_list = current_scores.head(self.topk).index.tolist()
 
         account = self.common_infra.get("trade_account")
         available_cash = account.get_cash() if hasattr(account, "get_cash") else getattr(account, "current_cash", 0)
-        
+
         # 排除已持仓和当日已卖出
         stocks_to_buy = [s for s in topk_list if (s not in current_holdings) and (s not in stocks_to_sell)]
-        
-        # 控制买入后总持仓不超过 max_positions
         slots_left = self.max_positions - active_positions
         stocks_to_buy = stocks_to_buy[:slots_left]
-        
-        if len(stocks_to_buy) > 0 and available_cash > 0:
-            cash_per_stock = (available_cash * 0.97) / len(stocks_to_buy) 
-            
+
+        if stocks_to_buy and available_cash > 0:
+            cash_per_stock = (available_cash * 0.97) / len(stocks_to_buy)
             for stock in stocks_to_buy:
-                price = close_prices.get(stock)
-                if pd.notna(price) and price > 0:
-                    shares = int(cash_per_stock / price / 100) * 100
-                    if shares > 0:
-                        order_list.append(OrderHelper.create(code=stock, amount=shares, direction=OrderDir.BUY))
-                        self.entry_prices[stock] = price  # 记录买入价用于止损
-                        print(f"[{trade_date_str}] 🟢 买入: {stock} ({shares} 股, 收盘={price:.2f}, bias={safe_stocks.loc[stock,'bias_5d']:.3f})")
+                price = safe_stocks.loc[stock, 'close_price']
+                if not np.isfinite(price) or price <= 0:
+                    continue
+                shares = int(cash_per_stock / price / 100) * 100
+                if shares > 0:
+                    order_list.append(OrderHelper.create(code=stock, amount=shares, direction=OrderDir.BUY))
+                    print(f"[{trade_date_str}] 🟢 买入: {stock} ({shares} 股, 收盘={price:.2f}, bias={safe_stocks.loc[stock,'bias_5d']:.3f})")
+                    # 注意: 买入成本不在下单时记账, 而在下一日按 execute_result 实际成交价入账(见步骤1)
 
         return TradeDecisionWO(order_list, self)
         
@@ -241,7 +287,7 @@ class ReboundHoldStrategy(BaseStrategy):
 if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser()
-    parser.add_argument("--strategy", type=str, choices=["rebound", "trend"], default="rebound")
+    parser.add_argument("--strategy", type=str, choices=["rebound", "trend"], default="trend")
     parser.add_argument("--pred", type=str, default=None, help="预测信号文件路径，默认根据 strategy 自动选择")
     parser.add_argument("--start", type=str, default="2026-02-15", help="回测开始日期")
     parser.add_argument("--end", type=str, default="2026-07-25", help="回测结束日期")
@@ -288,11 +334,14 @@ if __name__ == "__main__":
                 "topk": 2,
                 "bias_limit": 0.05,
                 "stop_loss": -0.08,
+                "take_profit": 0.10,      # 止盈: +10% 落袋
+                "trend_exit": is_trend,   # 趋势模式: 跌破MA5即退出, 锁利润/防回吐
                 "max_positions": 6,
                 "signal_max_age": 10,
                 "hold_days": 5,
                 "use_market_filter": not is_trend,  # 趋势策略不限制大盘方向
                 "trend_mode": is_trend,
+                "min_price": 1.0,         # 剔除仙股/低价垃圾股
             }
         }
 
@@ -398,7 +447,7 @@ if __name__ == "__main__":
         print(f"  最差日: {worst_day}  {report_df.loc[worst_day, 'return']:.2%}")
 
         plt.figure(figsize=(10, 5))
-        cumulative_return.plot(title=f"{args.strategy.upper()} Strategy - Cumulative Return")
+        strategy_return.plot(title=f"{args.strategy.upper()} Strategy - Cumulative Return")
         plt.grid(True)
         plt.tight_layout()
         plt.show()
