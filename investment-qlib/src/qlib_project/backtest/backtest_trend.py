@@ -1,11 +1,17 @@
 """
 趋势策略独立回测 (仅验证 trend 策略, 带止盈/止损)
 
+执行时序 (无前视):
+  T日收盘: 用 T 日收盘数据出信号/做止盈止损判定 (asof = 上一交易日)
+  T日收盘: 按 T 日收盘价统一成交 (买卖都是收盘价, 含到期卖出)
+  即 "T-1收盘决策 → T收盘执行"。决策只用上一交易日及以前的数据, 无前视。
+  (对比: 若 deal_price="open" 则是"次日开盘执行", 追涨策略会追高开、卖低开, 通常更差)
+
 核心修复与设计 (基于对 qlib 执行机制的排查):
   1. 按「实际成交」记账 (execute_result): 只有真正成交的买卖才入账,
      杜绝 qlib 涨跌停拒单造成的幻影持仓与重复卖出。
   2. 止损/止盈/趋势破坏(跌破MA5)/持有到期 四重卖出规则。
-  3. 买入前剔除当日涨停/一字板 (买不进的不买, 与选股池逻辑一致)。
+  3. 买入前剔除涨停/一字板 (买不进的不买, 与选股池逻辑一致)。
   4. 持仓等权分仓 (1/max_positions), 避免单票过度集中。
   5. 正确处理 D.features 的 MultiIndex (instrument, datetime),
      避免止损止盈因索引错位而失效。
@@ -83,8 +89,14 @@ class TrendBacktestStrategy(BaseStrategy):
       - 买入: 最新信号(未过期)按 score 取 topk, 过滤涨停/低价/放量杀跌,
               等权分仓 (每仓 1/max_positions)
       - 卖出: 止盈 / 止损 / 趋势破坏(跌破MA5) / 持有到期, 四选一先到先卖
+      - 冷却: 止损/趋势破坏卖出后 STOP_COOLDOWN_DAYS 内禁止重买同一只票
+              (止盈/到期属策略主动兑现, 不进入冷却)
       - 记账: 基于 execute_result 实际成交, 防止涨跌停拒单造成幻影持仓
     """
+
+    # 止损/趋势破坏卖出后的冷却期(自然日, 约 2 个交易日)。
+    # 防止同一只票止损卖出后隔天又被旧信号买回 → 反复止损(whipsaw)。
+    STOP_COOLDOWN_DAYS = 3
 
     def __init__(self, signal, topk=2, max_positions=3, hold_days=5,
                  stop_loss=-0.08, take_profit=0.10, trend_exit=True,
@@ -111,6 +123,10 @@ class TrendBacktestStrategy(BaseStrategy):
         # 交易日志 (用于胜率统计)
         self.trades = []                 # list[dict]
         self.trade_open: dict = {}       # stock -> 开仓记录(成本/日期)
+        # 止损冷却: stock -> 最近一次"止损/趋势破坏"卖出的日期 (止盈/到期不记)
+        self.stop_cooldown_until: dict = {}
+        # 缓存交易日历, 用于计算"决策基准日"(上一交易日, 收盘后才出信号/决策)
+        self.cal = D.calendar()
         super().__init__(**kwargs)
 
     # ---------------- 持仓获取 ----------------
@@ -128,6 +144,15 @@ class TrendBacktestStrategy(BaseStrategy):
         trade_date, _ = self.trade_calendar.get_step_time()
         trade_date_str = pd.Timestamp(trade_date).strftime("%Y-%m-%d")
         order_list = []
+
+        # 决策基准日 asof = 上一交易日: T日收盘拿到T日数据出信号/决策, 次日(T+1)开盘执行,
+        # 消除"当日收盘决策+当日收盘成交"的前视偏差。所有信号/止盈/止损/到期判断都用 asof 收盘数据。
+        _td_ts = pd.Timestamp(trade_date)
+        asof_idx = int(np.searchsorted(self.cal, _td_ts)) - 1
+        if asof_idx < 0:                      # 回测起始日无上一交易日, 空仓等待
+            return TradeDecisionWO(order_list, self)
+        asof_date = self.cal[asof_idx]
+        asof_str = pd.Timestamp(asof_date).strftime("%Y-%m-%d")
 
         # 1️⃣ 按上一日实际成交更新簿记 (涨跌停拒单的 order.deal_amount=0, 不入账)
         if execute_result is not None:
@@ -170,7 +195,7 @@ class TrendBacktestStrategy(BaseStrategy):
         prices_df = _features_single_day(
             list(current_holdings.keys()),
             ["$close", "$close / Mean($close, 5) - 1"],
-            trade_date,
+            asof_date,        # 决策基准日收盘价(次日开盘执行, 无前视)
             ["price", "bias_5d"],
         )
 
@@ -213,12 +238,15 @@ class TrendBacktestStrategy(BaseStrategy):
                         "reason": reason,
                     })
                     del self.trade_open[stock]
+                # 止损/趋势破坏 → 进入冷却期, 防止次日被旧信号买回反复止损
+                if reason in ("止损", "趋势破坏"):
+                    self.stop_cooldown_until[stock] = trade_date_str
                 print(f"[{trade_date_str}] 🔴 卖出({reason}): {stock} 盈亏={pnl:+.2%}")
 
         # 4️⃣ 买入决策
         if self.use_market_filter and self.last_update_date != trade_date_str:
             mkt = D.features(["SH000300"], ["$close", "Mean($close, 20)"],
-                             start_time=trade_date, end_time=trade_date)
+                             start_time=asof_date, end_time=asof_date)
             if mkt is not None and not mkt.empty:
                 row = mkt.iloc[0]
                 self._market_ok = row["$close"] >= row["Mean($close, 20)"]
@@ -232,10 +260,10 @@ class TrendBacktestStrategy(BaseStrategy):
         if slots_left <= 0:
             return TradeDecisionWO(order_list, self)
 
-        # --- 信号时效 ---
+        # --- 信号时效 (只用到 asof=上一交易日收盘的信号, 无前视) ---
         sig_dates = pd.to_datetime(self.signal.index.get_level_values("datetime"))
         sig_strs = sig_dates.strftime("%Y-%m-%d")
-        valid_mask = sig_strs <= trade_date_str
+        valid_mask = sig_strs <= asof_str
         if not valid_mask.any():
             return TradeDecisionWO(order_list, self)
         latest_sig = sig_strs[valid_mask].max()
@@ -253,6 +281,7 @@ class TrendBacktestStrategy(BaseStrategy):
         instruments = cur_scores.index.get_level_values("instrument").unique().tolist()
 
         # --- 候选行情: 5日乖离 / 收盘 / 量比 / 真实日涨幅(涨停检测) ---
+        # 用 asof(上一交易日)收盘数据做筛选, 次日开盘执行, 无前视
         feats = _features_single_day(
             instruments,
             [
@@ -261,7 +290,7 @@ class TrendBacktestStrategy(BaseStrategy):
                 "$amount / Mean($amount, 5)",
                 "($close / Ref($close, 1)) * (Ref($factor, 1) / $factor) - 1",
             ],
-            trade_date,
+            asof_date,
             ["bias_5d", "close_price", "vol_ratio", "ret_real"],
         )
         if feats.empty:
@@ -292,7 +321,23 @@ class TrendBacktestStrategy(BaseStrategy):
         account = self.common_infra.get("trade_account")
         cash = account.get_cash() if hasattr(account, "get_cash") else getattr(account, "current_cash", 0)
 
-        to_buy = [s for s in topk_list if (s not in current_holdings) and (s not in stocks_to_sell)][:slots_left]
+        # 止损冷却: 计算冷却期内禁止重买的集合, 并顺带清理过期记录
+        cooldown_reject = set()
+        expired = []
+        for s, d in list(self.stop_cooldown_until.items()):
+            if (pd.Timestamp(trade_date_str) - pd.Timestamp(d)).days <= self.STOP_COOLDOWN_DAYS:
+                cooldown_reject.add(s)
+            else:
+                expired.append(s)
+        for s in expired:
+            self.stop_cooldown_until.pop(s, None)
+
+        to_buy = [
+            s for s in topk_list
+            if (s not in current_holdings) and (s not in stocks_to_sell)
+            # 止损冷却: 止损/趋势破坏卖出后冷却期内禁止重买同一只票
+            and (s not in cooldown_reject)
+        ][:slots_left]
         if to_buy and cash > 0:
             # 等权分仓: 每仓 = 现金 * 0.98 / max_positions (避免单票过度集中)
             cash_per = (cash * 0.98) / self.max_positions
@@ -326,7 +371,7 @@ def main():
     parser.add_argument("--stop-loss", type=float, default=-0.08)
     parser.add_argument("--take-profit", type=float, default=0.10)
     parser.add_argument("--trend-exit", type=int, default=1, help="跌破MA5即退出(1开0关)")
-    parser.add_argument("--market-filter", type=int, default=0, help="大盘MA20风控(1开0关)")
+    parser.add_argument("--market-filter", type=int, default=1, help="大盘MA20风控(1开0关)")
     args = parser.parse_args()
 
     qlib.init(provider_uri=str(DATA_PATH), region="cn")
@@ -379,6 +424,8 @@ def main():
         exchange_kwargs={
             "freq": "day",
             "limit_threshold": 0.095,   # 涨跌停拒单(真实市场约束)
+            # 无前视 + 收盘执行: 决策只用 asof(上一交易日)收盘数据, T日收盘成交。
+            # 对比: "open"=次日开盘成交(追高开/卖低开, 对追涨不利), "close"=当日收盘成交。
             "deal_price": "close",
             "open_cost": 0.0005,
             "close_cost": 0.001,

@@ -12,6 +12,7 @@ from typing import List
 import qlib
 from qlib.data import D
 import pandas as pd
+import numpy as np
 
 BASE_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = BASE_DIR.parent
@@ -62,29 +63,40 @@ def _buyable_mask(df: pd.DataFrame) -> pd.Series:
 
 
 def filter_by_trend(codes: List[str], min_price=3.0, max_price=80,
-                    target_pool_size: int = 250):
+                    target_pool_size: int = 250, as_of_date=None):
     """
     趋势跟踪池筛选：选已经涨起来的，赌继续涨。
-    
+
     条件：
     1. 基础: 价格/流动性过滤
     2. 偏5d > 2%（短期强势）
     3. 偏20d > 0%（中期多头排列）
     4. 量比 > 0.8（非冷门缩量）
+
+    as_of_date: 筛选基准日(滚动回测/实盘用, 避免前视偏差)。
+        None = 最新交易日; 传入 str/Timestamp 时取 <= 该日的最近交易日作基准。
     """
     if not codes:
         return []
     try:
         cal = D.calendar()
-        last_day = cal[-1]
-        # 数据源可能滞后: 日历最新交易日未必已入库(如日历到08-12但特征只到08-11)。
-        # 若直接按 cal[-1] 查询, 结果为空会静默回退返回全部 codes, 涨停/一字板混入池中。
+        if as_of_date is None:
+            ref_idx = len(cal) - 1
+        else:
+            ref_idx = int(np.searchsorted(cal, pd.Timestamp(as_of_date), side='right')) - 1
+            if ref_idx < 0:
+                ref_idx = 0
+        ref_day = cal[ref_idx]
+        last_day = ref_day
+        # 数据源可能滞后: 基准日未必已入库(如日历到08-12但特征只到08-11)。
+        # 若直接按基准日查询, 结果为空会静默回退返回全部 codes, 涨停/一字板混入池中。
         # 这里回退探测, 取实际有特征数据的最近交易日作为过滤基准日。
-        for _day in cal[-1:-6:-1]:
+        for _i in range(ref_idx, max(ref_idx - 5, -1), -1):
+            _day = cal[_i]
             _probe = D.features(codes[:20], ["$close"], start_time=_day, end_time=_day)
             if _probe is not None and not _probe.empty:
-                if _day != cal[-1]:
-                    print(f"⚠️ 最新交易日 {cal[-1].date()} 无特征数据, 实际使用 {_day.date()}")
+                if _day != ref_day:
+                    print(f"⚠️ 基准日 {ref_day.date()} 无特征数据, 实际使用 {_day.date()}")
                 last_day = _day
                 break
 
@@ -145,6 +157,16 @@ def filter_by_trend(codes: List[str], min_price=3.0, max_price=80,
         return codes
 
 
+def get_mainboard_universe(start_time=None, end_time=None) -> List[str]:
+    """提取全主板候选(select_trend.main 同款口径), 供滚动训练每周重新选股"""
+    codes = D.list_instruments(
+        instruments=D.instruments(market='all'),
+        start_time=start_time, end_time=end_time, as_list=True,
+    )
+    codes = [c.strip().upper() for c in codes if _MAINBOARD_RE.match(c.strip().upper())]
+    return codes
+
+
 def main():
     qlib.init(provider_uri=str(DATA_PATH))
 
@@ -154,11 +176,7 @@ def main():
 
     print(f"正在提取 {start_dt} 至今活跃股票...")
 
-    codes = D.list_instruments(
-        instruments=D.instruments(market='all'),
-        start_time=start_dt, end_time=end_dt, as_list=True
-    )
-    codes = [c.strip().upper() for c in codes if _MAINBOARD_RE.match(c.strip().upper())]
+    codes = get_mainboard_universe(start_dt, end_dt)
     print(f"主板股票: {len(codes)} 只")
 
     codes = filter_by_trend(codes)

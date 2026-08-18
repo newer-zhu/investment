@@ -21,13 +21,14 @@ for path in (str(BASE_DIR), str(PROJECT_ROOT), str(SRC_ROOT)):
         sys.path.insert(0, path)
 
 from qlib_project.constants import (
-    DATA_PATH, CONFIG_PATH, TREND_POOL,
+    DATA_PATH, CONFIG_PATH, TREND_POOL, BASE_POOL,
     TREND_MODEL_DIR, TREND_MODEL_FILE, TREND_FEATURE_FILE,
     TREND_SIGNAL_FILE, TREND_PREDICTIONS_DIR,
 )
 from qlib_project.utils.util import load_stock_pool, send_email, load_config_from_ini
 from qlib_project.utils.email_report_utils import generate_trend_report_html
 from qlib_project.utils.backend_score_sender import build_backend_records_from_result, save_scores_to_backend
+from qlib_project.select.select_trend import filter_by_trend, get_mainboard_universe
 
 TREND_MODEL_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -376,7 +377,15 @@ def roll_train(test_start, test_end, stock_pool_path, data_path, hold_days=5):
         week_starts = [test_start_dt]
 
     all_predictions = []
-    base_pool = load_stock_pool(stock_pool_path)
+    # 候选池: 优先用传入的基础池(仅主板/行业过滤, 无动态量价过滤), 否则退回全主板。
+    # 每个周期在此候选内按"该周期开始时点"的行情重新做趋势筛选 → 模拟实盘每周刷新股票池。
+    if stock_pool_path and Path(stock_pool_path).exists():
+        base_pool = load_stock_pool(stock_pool_path)
+        print(f"  📦 基础候选池: {len(base_pool)} 只 (来自 {Path(stock_pool_path).name})")
+    else:
+        base_pool = get_mainboard_universe(
+            cal[0].strftime('%Y-%m-%d'), cal[-1].strftime('%Y-%m-%d'))
+        print(f"  📦 基础候选池: {len(base_pool)} 只 (全主板)")
 
     for i, ws in enumerate(week_starts):
         if i + 1 < len(week_starts):
@@ -402,6 +411,16 @@ def roll_train(test_start, test_end, stock_pool_path, data_path, hold_days=5):
         if train_end_idx < 0:
             continue
 
+        # ---- 每周重新选股 (实盘无前视) ----
+        # 周一开盘前只能拿到上周五(及更早)的数据, 所以用"本周开始前最近交易日"作筛选基准,
+        # 再结合滚动训练段(也都在本周之前)训练模型 → 预测本周。池子每周动态进出。
+        as_of_idx = max(ws_idx - 1, 0)
+        cycle_pool = filter_by_trend(base_pool, as_of_date=cal[as_of_idx])
+        if not cycle_pool:
+            cycle_pool = base_pool   # 筛选异常/为空时兜底
+        print(f"  [{i+1}/{len(week_starts)}] {ws_str}~{we_str}: "
+              f"趋势池 {len(cycle_pool)} 只 (基准 {pd.Timestamp(cal[as_of_idx]).date()})")
+
         segments = {
             "train": ("2021-01-01", cal[train_end_idx].strftime('%Y-%m-%d')),
             "valid": (cal[valid_start_idx].strftime('%Y-%m-%d'),
@@ -410,7 +429,7 @@ def roll_train(test_start, test_end, stock_pool_path, data_path, hold_days=5):
         }
 
         handler_cls = get_trend_handler(hold_days)
-        handler = handler_cls(instruments=base_pool,
+        handler = handler_cls(instruments=cycle_pool,
                               start_time="2021-01-01",
                               end_time=segments["test"][1])  # 必须覆盖到 test 段
         ds = DatasetH(handler=handler, segments=segments)
@@ -421,7 +440,7 @@ def roll_train(test_start, test_end, stock_pool_path, data_path, hold_days=5):
         if isinstance(pred, pd.Series):
             pred = pred.to_frame("score")
         all_predictions.append(pred)
-        print(f"  [{i+1}/{len(week_starts)}] {ws_str}~{we_str}: {len(pred)} 条信号")
+        print(f"       {ws_str}~{we_str}: {len(pred)} 条信号")
 
     final_pred = pd.concat(all_predictions)
     final_pred = final_pred[~final_pred.index.duplicated(keep='first')].sort_index()
@@ -442,7 +461,9 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     if args.mode == "roll":
-        roll_train(args.test_start, args.test_end, TREND_POOL, DATA_PATH, args.hold_days)
+        # 基础池传 BASE_POOL(仅主板/行业过滤, 不含动态量价过滤):
+        # roll 内部每周按当时行情重新趋势选股; 若文件不存在则自动退回全主板候选。
+        roll_train(args.test_start, args.test_end, BASE_POOL, DATA_PATH, args.hold_days)
     elif args.mode == "predict":
         # ===== 单日预测模式 =====
         _ensure_qlib_init()
