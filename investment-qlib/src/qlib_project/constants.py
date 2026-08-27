@@ -37,6 +37,29 @@ REBOUND_SIGNAL_FILE = REBOUND_MODEL_DIR / "lgb_rebound_pred.pkl"
 # ================== 预测结果输出 ==================
 TREND_PREDICTIONS_DIR = PROJECT_ROOT / "data" / "trend_predictions"
 REBOUND_PREDICTIONS_DIR = PROJECT_ROOT / "data" / "rebound_predictions"
+# 回测绩效摘要 (backtest_trend.py 生成, 存档用)
+TREND_BACKTEST_SUMMARY = PROJECT_ROOT / "logs" / "trend_backtest_summary.json"
+
+# ================== 趋势交易规则 (回测与仓位管理共用, 修改需保持一致) ==================
+TREND_RULES = {
+    "topk": 2,
+    "max_positions": 3,
+    "hold_days": 5,
+    "stop_loss": -0.08,
+    "take_profit": 0.10,
+    "trend_exit": True,
+    "trend_exit_ma": 10,
+    "trend_exit_buffer": 0.01,
+    "trend_break_min_hold": 2,
+    "use_market_filter": True,
+    "market_exit": True,
+    "signal_max_age": 10,
+    "min_price": 1.0,
+    "vol_ratio_max": 1.5,
+}
+
+# ================== 持仓状态 (position_manager 记录实盘持仓) ==================
+TREND_POSITIONS_FILE = PROJECT_ROOT / "data" / "positions" / "trend_positions.json"
 
 # ================== API Token ==================
 TUSHARE_TOKEN = "2f80f707c09dc4ce6c59eb215739349f7a203485b19b4401a683bb6549ec"

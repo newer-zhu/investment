@@ -491,6 +491,40 @@ def roll_train(test_start, test_end, stock_pool_path, data_path, hold_days=5):
     print(f"\n✅ 趋势滚动训练完成: {len(final_pred)} 条 → {TREND_SIGNAL_FILE}")
 
 
+# ================== 邮件发送 ==================
+def _send_trend_report_email(pick_date, result, n_candidates, guidance):
+    """发送趋势策略邮件报告 (含明日操作指导)。result 可为 None (仅指导邮件)。"""
+    try:
+        print(f"🔍 配置文件路径: {CONFIG_PATH}")
+        _email_cfg = load_config_from_ini("email", str(CONFIG_PATH))
+        TO_EMAILS = [e.strip() for e in _email_cfg.get("to_emails", "").split(",") if e.strip()] or [_email_cfg.get("to_email", "")]
+        FROM_EMAIL = _email_cfg.get("from_email", "")
+        FROM_PASSWORD = _email_cfg.get("from_password", "")
+        SMTP_SERVER = _email_cfg.get("smtp_server", "smtp.qq.com")
+        SMTP_PORT = int(_email_cfg.get("smtp_port", "587"))
+
+        print(f"📧 邮件配置 - 发件人: {FROM_EMAIL}")
+        print(f"📧 邮件配置 - 收件人: {TO_EMAILS}")
+
+        html_body = generate_trend_report_html(pick_date, result, n_candidates, guidance)
+        subject = f"📈 趋势跟踪策略报告 - {pick_date}"
+
+        for to_email in TO_EMAILS:
+            send_email(
+                subject=subject,
+                body=html_body,
+                to_email=to_email,
+                from_email=FROM_EMAIL,
+                from_password=FROM_PASSWORD,
+                smtp_server=SMTP_SERVER,
+                smtp_port=SMTP_PORT,
+                content_type="html"
+            )
+        print("📧 邮件报告已发送成功！")
+    except Exception as e:
+        print(f"❌ 邮件发送失败: {e}")
+
+
 # ================== 实盘单日预测 ==================
 def predict_day(date_str, stock_pool_path, data_path, hold_days=5, topk=6,
                 use_market_filter=True):
@@ -533,17 +567,28 @@ def predict_day(date_str, stock_pool_path, data_path, hold_days=5, topk=6,
         return None
     print(f"\n📈 趋势预测, 决策基准日: {pd.Timestamp(asof_date).date()}")
 
-    # 大盘 MA20 风控 (与回测 use_market_filter 一致): 大盘<MA20 暂停买入
+    # 大盘 MA20 风控 (与回测 use_market_filter 一致): 大盘<MA20 暂停买入 (但仍发清仓/卖出指导)
+    market_ok = True
     if use_market_filter:
         mkt = D.features(["SH000300"], ["$close", "Mean($close, 20)"],
                          start_time=asof_date, end_time=asof_date)
         if mkt is not None and not mkt.empty:
             row = mkt.iloc[0]
-            if row["$close"] < row["Mean($close, 20)"]:
+            market_ok = bool(row["$close"] >= row["Mean($close, 20)"])
+            if not market_ok:
                 print(f"⚠️ 大盘在 MA20 下方 ({pd.Timestamp(asof_date).date()}), 暂停买入 (与回测一致)")
-                return None
         else:
             print("⚠️ 无法获取大盘数据, 跳过 MA20 风控")
+
+    # 仓位管理: 先生成持仓操作指导 (与回测规则一致); 大盘<MA20 时仅发指导邮件, 不训练模型
+    from qlib_project.strategy.position_manager import build_daily_guidance
+    guidance = build_daily_guidance(asof_date=asof_date, market_ok=market_ok, buy_result=None)
+
+    if not market_ok:
+        print("⚠️ 大盘在 MA20 下方, 仅发送操作指导 (清仓/暂停买入)")
+        pick_date = pd.Timestamp(asof_date).strftime('%Y-%m-%d')
+        _send_trend_report_email(pick_date, None, 0, guidance)
+        return None
 
     # 定位"权威信号"所在周 (与 roll 一致):
     # roll 的周测试段为 [周一, 下周一], 周一那天的信号由"上一周模型"产出(dedup keep='first'),
@@ -577,7 +622,9 @@ def predict_day(date_str, stock_pool_path, data_path, hold_days=5, topk=6,
     result, n_candidates = apply_trend_buy_filter(
         day_scores, asof_date=asof_date, topk=topk)
     if result.empty:
-        print("❌ 过滤后无候选 (当日无符合条件的趋势股)")
+        print("❌ 过滤后无候选 (当日无符合条件的趋势股), 仅发送操作指导")
+        pick_date = pd.Timestamp(asof_date).strftime('%Y-%m-%d')
+        _send_trend_report_email(pick_date, None, n_candidates, guidance)
         return None
 
     result = result.copy()
@@ -602,37 +649,11 @@ def predict_day(date_str, stock_pool_path, data_path, hold_days=5, topk=6,
     else:
         print(f"⚠️ 后端批量保存未成功: {backend_response.get('message', 'unknown error')}")
 
-    # 发送邮件报告
-    try:
-        print(f"🔍 配置文件路径: {CONFIG_PATH}")
-        _email_cfg = load_config_from_ini("email", str(CONFIG_PATH))
-        TO_EMAILS = [e.strip() for e in _email_cfg.get("to_emails", "").split(",") if e.strip()] or [_email_cfg.get("to_email", "")]
-        FROM_EMAIL = _email_cfg.get("from_email", "")
-        FROM_PASSWORD = _email_cfg.get("from_password", "")
-        SMTP_SERVER = _email_cfg.get("smtp_server", "smtp.qq.com")
-        SMTP_PORT = int(_email_cfg.get("smtp_port", "587"))
+    # 重建操作指导 (带上今日买入候选)
+    guidance = build_daily_guidance(asof_date=asof_date, market_ok=True, buy_result=result)
 
-        print(f"📧 邮件配置 - 发件人: {FROM_EMAIL}")
-        print(f"📧 邮件配置 - 收件人: {TO_EMAILS}")
-        print(f"📧 邮件配置 - SMTP: {SMTP_SERVER}:{SMTP_PORT}")
-
-        html_body = generate_trend_report_html(pick_date, result, n_candidates)
-        subject = f"📈 趋势跟踪策略报告 - {pick_date}"
-
-        for to_email in TO_EMAILS:
-            send_email(
-                subject=subject,
-                body=html_body,
-                to_email=to_email,
-                from_email=FROM_EMAIL,
-                from_password=FROM_PASSWORD,
-                smtp_server=SMTP_SERVER,
-                smtp_port=SMTP_PORT,
-                content_type="html"
-            )
-        print("📧 邮件报告已发送成功！")
-    except Exception as e:
-        print(f"❌ 邮件发送失败: {e}")
+    # 发送邮件报告 (含明日操作指导)
+    _send_trend_report_email(pick_date, result, n_candidates, guidance)
 
     return result
 

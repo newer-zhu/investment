@@ -43,9 +43,9 @@ for path in (str(BASE_DIR), str(PROJECT_ROOT), str(SRC_ROOT)):
     if path not in sys.path:
         sys.path.insert(0, path)
 try:
-    from constants import DATA_PATH, TREND_SIGNAL_FILE
+    from constants import DATA_PATH, TREND_SIGNAL_FILE, TREND_RULES
 except ImportError:
-    from qlib_project.constants import DATA_PATH, TREND_SIGNAL_FILE
+    from qlib_project.constants import DATA_PATH, TREND_SIGNAL_FILE, TREND_RULES
 
 # 与趋势实盘 (trend_strategy.predict_day) 共用同一买入过滤, 保证回测与实盘一致
 from qlib_project.strategy.trend_strategy import apply_trend_buy_filter
@@ -379,20 +379,20 @@ def main():
     parser.add_argument("--pred", type=str, default=None, help="信号文件, 默认 TREND_SIGNAL_FILE")
     parser.add_argument("--start", type=str, default="2026-02-10")
     parser.add_argument("--end", type=str, default="2026-08-10")
-    parser.add_argument("--topk", type=int, default=2, help="每次买入的股票数(信号日)")
-    parser.add_argument("--max-positions", type=int, default=3, help="持有股票数上限")
-    parser.add_argument("--hold-days", type=int, default=5)
-    parser.add_argument("--stop-loss", type=float, default=-0.08)
-    parser.add_argument("--take-profit", type=float, default=0.10)
-    parser.add_argument("--trend-exit", type=int, default=1, help="趋势破坏退出(1开0关)")
-    parser.add_argument("--trend-exit-ma", type=int, default=10,
+    parser.add_argument("--topk", type=int, default=TREND_RULES["topk"], help="每次买入的股票数(信号日)")
+    parser.add_argument("--max-positions", type=int, default=TREND_RULES["max_positions"], help="持有股票数上限")
+    parser.add_argument("--hold-days", type=int, default=TREND_RULES["hold_days"])
+    parser.add_argument("--stop-loss", type=float, default=TREND_RULES["stop_loss"])
+    parser.add_argument("--take-profit", type=float, default=TREND_RULES["take_profit"])
+    parser.add_argument("--trend-exit", type=int, default=int(TREND_RULES["trend_exit"]), help="趋势破坏退出(1开0关)")
+    parser.add_argument("--trend-exit-ma", type=int, default=TREND_RULES["trend_exit_ma"],
                         help="趋势破坏均线周期(5=MA5, 10=MA10, 默认10更钝化少被洗)")
-    parser.add_argument("--trend-exit-buffer", type=float, default=0.01,
+    parser.add_argument("--trend-exit-buffer", type=float, default=TREND_RULES["trend_exit_buffer"],
                         help="趋势破坏缓冲带: 收盘需跌破均线该比例才触发(0=关闭缓冲)")
-    parser.add_argument("--trend-break-min-hold", type=int, default=2,
+    parser.add_argument("--trend-break-min-hold", type=int, default=TREND_RULES["trend_break_min_hold"],
                         help="趋势破坏退出的最短持有天数(持有<该天数不触发, 止损仍生效)")
-    parser.add_argument("--market-filter", type=int, default=1, help="大盘MA20风控(1开0关)")
-    parser.add_argument("--market-exit", type=int, default=1,
+    parser.add_argument("--market-filter", type=int, default=int(TREND_RULES["use_market_filter"]), help="大盘MA20风控(1开0关)")
+    parser.add_argument("--market-exit", type=int, default=int(TREND_RULES["market_exit"]),
                         help="大盘<MA20时全仓离场(1开0关, 叠加暂停买入降低beta回撤)")
     args = parser.parse_args()
 
@@ -429,8 +429,8 @@ def main():
             "trend_break_min_hold": args.trend_break_min_hold,
             "use_market_filter": bool(args.market_filter),
             "market_exit": bool(args.market_exit),
-            "min_price": 1.0,
-            "signal_max_age": 10,
+            "min_price": TREND_RULES["min_price"],
+            "signal_max_age": TREND_RULES["signal_max_age"],
         },
     }
     executor_config = {
@@ -508,6 +508,54 @@ def main():
     print("\n⚠️ 极端日:")
     print(f"  最佳: {report_df['return'].idxmax()} +{report_df['return'].max():.2%}")
     print(f"  最差: {report_df['return'].idxmin()} {report_df['return'].min():.2%}")
+
+    # ---------- 保存回测绩效摘要 (供每日 predict 邮件展示) ----------
+    try:
+        import json as _json
+        from qlib_project.constants import TREND_BACKTEST_SUMMARY
+    except ImportError:
+        import json as _json
+        from constants import TREND_BACKTEST_SUMMARY
+
+    _bm_total = float(bm_total) if (isinstance(bm_total, float) and not pd.isna(bm_total)) else None
+    summary = {
+        "generated_at": pd.Timestamp.now().strftime('%Y-%m-%d %H:%M:%S'),
+        "window": {
+            "start": report_df.index[0].strftime('%Y-%m-%d'),
+            "end": report_df.index[-1].strftime('%Y-%m-%d'),
+            "days": n,
+        },
+        "config": {
+            "topk": args.topk,
+            "max_positions": args.max_positions,
+            "hold_days": args.hold_days,
+            "stop_loss": args.stop_loss,
+            "take_profit": args.take_profit,
+            "trend_exit": bool(args.trend_exit),
+            "trend_exit_ma": args.trend_exit_ma,
+            "trend_exit_buffer": args.trend_exit_buffer,
+            "trend_break_min_hold": args.trend_break_min_hold,
+            "use_market_filter": bool(args.market_filter),
+            "market_exit": bool(args.market_exit),
+        },
+        "stats": {
+            "cum_return": float(total - 1),
+            "annual": float(annual),
+            "vol": float(vol),
+            "sharpe": float(sharpe),
+            "mdd": float(mdd),
+            "turnover": float(report_df['turnover'].mean()),
+        },
+        "benchmark_cum": _bm_total,
+        "monthly": [
+            {"month": m.strftime('%Y-%m'), "return": float(r)}
+            for m, r in monthly.items()
+        ],
+    }
+    TREND_BACKTEST_SUMMARY.parent.mkdir(parents=True, exist_ok=True)
+    with open(str(TREND_BACKTEST_SUMMARY), 'w', encoding='utf-8') as f:
+        _json.dump(summary, f, ensure_ascii=False, indent=2)
+    print(f"\n💾 回测绩效摘要已保存: {TREND_BACKTEST_SUMMARY}")
 
     # 画图
     fig, ax = plt.subplots(figsize=(10, 5))

@@ -246,11 +246,85 @@ def generate_rebound_report_html(pool_date: str, result: pd.DataFrame, total_can
     return html
 
 
-def generate_trend_report_html(pool_date: str, result: pd.DataFrame, total_candidates: int) -> str:
+def _render_operation_guidance(g) -> str:
+    """把仓位管理生成的"明日操作指导"渲染成 HTML 区块; g 为 None 时返回空串。"""
+    if not g:
+        return ""
+
+    mkt_ok = g.get("market_ok", True)
+    mkt_txt = "🟢 大盘健康(MA20 上方)" if mkt_ok else "🔴 大盘风险(MA20 下方): 暂停买入 + 全仓离场"
+    if g.get("market_close") is not None:
+        mkt_txt += f"　HS300 {g['market_close']:.2f} / MA20 {g['market_ma20']:.2f}"
+    mkt_color = "#27ae60" if mkt_ok else "#e74c3c"
+
+    holdings = g.get("holdings") or []
+    if holdings:
+        rows = ""
+        for a in holdings:
+            pnl = a.get("pnl")
+            pnl_s = f"{pnl:+.2%}" if pnl is not None else "N/A"
+            is_sell = a.get("action") == "卖出"
+            color = "#e74c3c" if is_sell else "#27ae60"
+            reason = a.get("reason") or ""
+            trig = a.get("trigger") or ""
+            rows += (
+                "<tr>"
+                f"<td>{a['code']}</td>"
+                f"<td>{a.get('entry_date', '')}</td>"
+                f"<td>{a.get('entry_price')}</td>"
+                f"<td>{a.get('price') if a.get('price') is not None else '-'}</td>"
+                f"<td>{pnl_s}</td>"
+                f"<td>{a.get('held_days')}</td>"
+                f"<td style='color:{color};font-weight:bold'>{a.get('action')}</td>"
+                f"<td style='text-align:left'>{reason} {trig}</td>"
+                "</tr>"
+            )
+        holdings_html = f"""
+      <table>
+        <tr><th>代码</th><th>买入日</th><th>成本</th><th>现价</th><th>盈亏</th><th>持有天</th><th>明日操作</th><th>说明 / 触发价</th></tr>
+        {rows}
+      </table>"""
+    else:
+        holdings_html = "<p style='color:#7f8c8d;'>当前无持仓。</p>"
+
+    if g.get("buy_codes"):
+        buy_note = (f"<p style='color:#27ae60;font-weight:bold;'>🟢 明日可买入候选 ({len(g['buy_codes'])}): "
+                    f"{'、'.join(g['buy_codes'])}</p>"
+                    f"<p style='color:#7f8c8d;font-size:12px;'>每仓等权 = 可用资金 × 0.98 / {g.get('max_positions')}; "
+                    f"买入后持有 {g.get('hold_days')} 日, 止损 {g.get('stop_loss'):+.0%}, 止盈 {g.get('take_profit'):+.0%}</p>")
+    elif mkt_ok:
+        buy_note = "<p style='color:#7f8c8d;'>今日过滤后无符合买入条件的候选, 保持空仓/观察。</p>"
+    else:
+        buy_note = "<p style='color:#e74c3c;'>⚠️ 大盘在 MA20 下方, 暂停买入。</p>"
+
+    return f"""
+    <div class="summary">
+      <h2>📋 明日操作指导 ({g.get('asof_date', '?')})</h2>
+      <p style="font-weight:bold;color:{mkt_color};">{mkt_txt}</p>
+      <h3>📦 当前持仓 ({len(holdings)} 只)</h3>
+      {holdings_html}
+      {buy_note}
+    </div>"""
+
+
+def generate_trend_report_html(pool_date: str, result: pd.DataFrame, total_candidates: int,
+                               operation_guidance: dict = None) -> str:
     """
     生成趋势跟踪策略报告 HTML
+    operation_guidance: 可选, 仓位管理生成的"明日操作指导" (position_manager.build_daily_guidance)。
+    result: 今日买入候选; 可为 None(仅发送操作指导邮件)。
     """
+    if result is None or result.empty:
+        result = pd.DataFrame(
+            {"score": pd.Series(dtype=float),
+             "bias_5d": pd.Series(dtype=float),
+             "bias_20d": pd.Series(dtype=float),
+             "vol_ratio": pd.Series(dtype=float)},
+            index=pd.Index([], name="instrument"),
+        )
     num_selected = len(result)
+    select_ratio = f"{(num_selected / total_candidates * 100):.1f}%" if total_candidates else "-"
+    operation_html = _render_operation_guidance(operation_guidance)
 
     # 格式化表格
     display_cols = ['instrument', 'score', 'bias_5d', 'bias_20d', 'vol_ratio']
@@ -433,7 +507,7 @@ def generate_trend_report_html(pool_date: str, result: pd.DataFrame, total_candi
                     <div class="label">入选股票数</div>
                 </div>
                 <div class="stat">
-                    <div class="number">{(num_selected/total_candidates*100):.1f}%</div>
+                    <div class="number">{select_ratio}</div>
                     <div class="label">入选比例</div>
                 </div>
             </div>
@@ -467,6 +541,8 @@ def generate_trend_report_html(pool_date: str, result: pd.DataFrame, total_candi
                 </ul>
             </div>
         </div>
+
+        {operation_html}
 
         <div class="table-container">
             <table>
