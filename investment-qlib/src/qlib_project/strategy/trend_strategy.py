@@ -2,7 +2,6 @@
 趋势跟踪策略：动量延续
 与超跌反弹相反——追涨杀跌，买已经涨的赌继续涨
 """
-import json
 import sys
 from pathlib import Path
 import pandas as pd
@@ -21,9 +20,8 @@ for path in (str(BASE_DIR), str(PROJECT_ROOT), str(SRC_ROOT)):
         sys.path.insert(0, path)
 
 from qlib_project.constants import (
-    DATA_PATH, CONFIG_PATH, TREND_POOL, BASE_POOL,
-    TREND_MODEL_DIR, TREND_MODEL_FILE, TREND_FEATURE_FILE,
-    TREND_SIGNAL_FILE, TREND_PREDICTIONS_DIR,
+    DATA_PATH, CONFIG_PATH, BASE_POOL,
+    TREND_MODEL_DIR, TREND_SIGNAL_FILE, TREND_PREDICTIONS_DIR,
 )
 from qlib_project.utils.util import load_stock_pool, send_email, load_config_from_ini
 from qlib_project.utils.email_report_utils import generate_trend_report_html
@@ -53,6 +51,82 @@ def _limit_up_threshold(code: str) -> float:
         return 0.298
     # 主板(60/00/001/002/003): 10%
     return 0.098
+
+
+def _features_single_day(codes, fields, trade_date, names):
+    """安全取单日行情: 处理 D.features 的 MultiIndex (instrument, datetime),
+    返回以 instrument 为索引、列名为 names 的 DataFrame。与 backtest_trend 同款。
+
+    注意: 必须按 fields 传入顺序重命名列 —— D.features 返回的列即 fields 顺序,
+    而 columns.difference() 会返回排序后的列, 若按其 zip 重命名会错位(历史 bug)。
+    """
+    if not codes:
+        return pd.DataFrame(columns=names)
+    df = D.features(codes, fields, start_time=trade_date, end_time=trade_date)
+    if df is None or df.empty:
+        return pd.DataFrame(columns=names)
+    df = df.reset_index()
+    df["instrument"] = df["instrument"].astype(str).str.upper()
+    # D.features 列顺序 == fields 顺序: 去掉前两个索引列后按原序重命名
+    field_cols = list(df.columns)[2:len(names) + 2]
+    df = df.rename(columns=dict(zip(field_cols, names)))
+    return df.set_index("instrument")[names]
+
+
+def apply_trend_buy_filter(scores, asof_date, topk=2, min_price=1.0, vol_ratio_max=1.5):
+    """回测/实盘共用的趋势买入过滤 (单一事实来源, 与 backtest_trend 的买入门完全一致)。
+
+    scores: 当日信号 (Series 或含 'score' 列的 DataFrame), index 为 instrument。
+    asof_date: 决策基准日 (用该日收盘价做过滤, 无前视)。
+    返回: (topk_result, n_candidates)。
+      - topk_result: 已按 score 降序截取 topk 的 DataFrame, 含
+        score/bias_5d/bias_20d/close_price/vol_ratio/ret_real
+      - n_candidates: 通过质量门(价格/量比/涨停剔除)的候选数
+    """
+    # 兼容 MultiIndex (datetime, instrument): 取 instrument 层作为股票代码索引
+    if isinstance(scores.index, pd.MultiIndex):
+        scores = scores.copy()
+        scores.index = scores.index.get_level_values(-1)
+    instruments = list(scores.index)
+    feats = _features_single_day(
+        instruments,
+        [
+            "$close / Mean($close, 5) - 1",
+            "$close / Mean($close, 20) - 1",
+            "$close",
+            "$amount / Mean($amount, 5)",
+            "($close / Ref($close, 1)) * (Ref($factor, 1) / $factor) - 1",
+        ],
+        asof_date,
+        ["bias_5d", "bias_20d", "close_price", "vol_ratio", "ret_real"],
+    )
+    if feats.empty:
+        return pd.DataFrame(columns=["score", "bias_5d", "bias_20d",
+                                     "close_price", "vol_ratio", "ret_real"]), 0
+    sc = scores["score"] if isinstance(scores, pd.DataFrame) else scores.rename("score")
+    combined = pd.DataFrame({"score": sc}).join(feats, how="inner")
+    if combined.empty:
+        return combined, 0
+
+    # --- 质量门: 价格下限 / 量比 / 剔除当日涨停(买不进) ---
+    lim = combined.index.map(_limit_up_threshold)
+    lim = pd.Series(lim.values, index=combined.index)
+    candidates = combined[
+        (combined["close_price"] > min_price) &
+        (combined["vol_ratio"] < vol_ratio_max) &
+        (combined["ret_real"] < (lim - 0.002))
+    ].copy()
+    if candidates.empty:
+        return candidates, 0
+
+    # --- 趋势门: 5日乖离顶部分位 + 决策日仍收涨(动量未断) ---
+    top_q = candidates["bias_5d"].quantile(0.70)
+    safe = candidates[
+        (candidates["bias_5d"] > max(top_q, 0.02)) &
+        (candidates["ret_real"] > 0)
+    ]
+    ranked = safe["score"].dropna().sort_values(ascending=False)
+    return safe.loc[ranked.head(topk).index], len(candidates)
 
 
 # ================== 纯动量 Feature Handler ==================
@@ -307,58 +381,66 @@ def signal_ic(score, label) -> pd.DataFrame:
     return pd.DataFrame({"ic": ic_list, "rank_ic": rk_list})
 
 
-# ================== 训练 ==================
-def train_once(test_start, test_end, stock_pool_path, data_path, hold_days=5):
-    print(f"\n{'='*60}")
-    print(f"📈 趋势跟踪模型训练: {test_start} → {test_end}")
-    print(f"{'='*60}")
-    _ensure_qlib_init(data_path)
+# ================== 单周滚动周期 (roll 与 predict 共用) ==================
+def _run_week_cycle(base_pool, ws, we, test_end, hold_days, cal):
+    """单周完整流程: 每周重新趋势选股 + 滚动训练当周模型 + 预测当周, 无前视。
 
-    cal = D.calendar(start_time="2021-01-01", end_time="2027-12-31")
-    test_start_dt = pd.Timestamp(test_start)
-    test_start_idx = np.searchsorted(cal, test_start_dt)
-    valid_end_idx = test_start_idx - (hold_days + 2)
+    roll 回测与 predict 实盘都调用它, 保证信号来源与池子刷新逻辑完全一致。
+    ws/we: 与 roll 相同的周窗口边界 (周一 与 下周一前一天/回测结束日)。
+    test_end: 测试段截断日 (与 roll 的 min(cal[we_idx], test_end) 一致)。
+    返回 dict (ws/we/cycle_pool/as_of_date/segments/pred); 无有效窗口时返回 None。
+    """
+    ws_idx = np.searchsorted(cal, ws)
+    we_idx = min(np.searchsorted(cal, we), len(cal) - 1)   # 日期可能超出数据末尾, 钳制防越界
+    if ws_idx >= len(cal):
+        return None
+    aws = cal[ws_idx]
+    awe = min(cal[we_idx], pd.Timestamp(test_end))
+    if aws > awe:
+        return None
+
+    ws_str = aws.strftime('%Y-%m-%d')
+    we_str = awe.strftime('%Y-%m-%d')
+
+    valid_end_idx = ws_idx - (hold_days + 2)
     valid_start_idx = valid_end_idx - 80
     train_end_idx = valid_start_idx - (hold_days + 2)
+    if train_end_idx < 0:
+        return None
+
+    # ---- 每周重新选股 (实盘无前视) ----
+    # 用"本周开始前最近交易日"作筛选基准, 再结合滚动训练段(也都在本周之前)训练模型。
+    as_of_idx = max(ws_idx - 1, 0)
+    as_of_date = cal[as_of_idx]
+    cycle_pool = filter_by_trend(base_pool, as_of_date=as_of_date)
+    if not cycle_pool:
+        cycle_pool = base_pool   # 筛选异常/为空时兜底
 
     segments = {
         "train": ("2021-01-01", cal[train_end_idx].strftime('%Y-%m-%d')),
         "valid": (cal[valid_start_idx].strftime('%Y-%m-%d'),
                   cal[valid_end_idx].strftime('%Y-%m-%d')),
-        "test": (test_start, test_end),
+        "test": (ws_str, we_str),
     }
-    print(f"  Train: {segments['train'][0]} ~ {segments['train'][1]}")
-    print(f"  Valid: {segments['valid'][0]} ~ {segments['valid'][1]}")
-    print(f"  Test:  {segments['test'][0]} ~ {segments['test'][1]}")
-
-    stock_in = load_stock_pool(stock_pool_path)
-    print(f"  📦 股票池: {len(stock_in)} 只")
 
     handler_cls = get_trend_handler(hold_days)
-    handler = handler_cls(instruments=stock_in, start_time="2021-01-01",
+    handler = handler_cls(instruments=cycle_pool,
+                          start_time="2021-01-01",
                           end_time=segments["test"][1])  # 必须覆盖到 test 段
     ds = DatasetH(handler=handler, segments=segments)
-
     model = LGBModel(**get_trend_model_params())
     model.fit(ds)
 
-    # IC
-    pred = model.predict(ds, segment="valid")
+    pred = model.predict(ds, segment="test")
     if isinstance(pred, pd.Series):
         pred = pred.to_frame("score")
-    label = ds.prepare(segments="valid", col_set="label")
-    combined = pd.concat([pred, label], axis=1).dropna()
-    if not combined.empty:
-        ic = signal_ic(combined.iloc[:, 0], combined.iloc[:, 1])
-        print(f"  📈 Valid IC: {ic['ic'].mean():.4f}, Rank IC: {ic['rank_ic'].mean():.4f}")
-
-    # 预测
-    test_pred = model.predict(ds, segment="test")
-    if isinstance(test_pred, pd.Series):
-        test_pred = test_pred.to_frame("score")
-    print(f"  ✅ 生成 {len(test_pred)} 条信号")
-
-    return test_pred, model
+    return {
+        "ws": ws_str, "we": we_str,
+        "cycle_pool": cycle_pool,
+        "as_of_date": as_of_date,
+        "segments": segments,
+        "pred": pred,
+    }
 
 
 # ================== 滚动训练 ==================
@@ -393,54 +475,14 @@ def roll_train(test_start, test_end, stock_pool_path, data_path, hold_days=5):
         else:
             we = test_end_dt
 
-        ws_idx = np.searchsorted(cal, ws)
-        we_idx = np.searchsorted(cal, we)
-        if ws_idx >= len(cal):
+        cycle = _run_week_cycle(base_pool, ws, we, test_end_dt, hold_days, cal)
+        if cycle is None:
             continue
-        aws = cal[ws_idx]
-        awe = min(cal[we_idx], pd.Timestamp(test_end))
-        if aws > awe:
-            continue
-
-        ws_str = aws.strftime('%Y-%m-%d')
-        we_str = awe.strftime('%Y-%m-%d')
-
-        valid_end_idx = ws_idx - (hold_days + 2)
-        valid_start_idx = valid_end_idx - 80
-        train_end_idx = valid_start_idx - (hold_days + 2)
-        if train_end_idx < 0:
-            continue
-
-        # ---- 每周重新选股 (实盘无前视) ----
-        # 周一开盘前只能拿到上周五(及更早)的数据, 所以用"本周开始前最近交易日"作筛选基准,
-        # 再结合滚动训练段(也都在本周之前)训练模型 → 预测本周。池子每周动态进出。
-        as_of_idx = max(ws_idx - 1, 0)
-        cycle_pool = filter_by_trend(base_pool, as_of_date=cal[as_of_idx])
-        if not cycle_pool:
-            cycle_pool = base_pool   # 筛选异常/为空时兜底
-        print(f"  [{i+1}/{len(week_starts)}] {ws_str}~{we_str}: "
-              f"趋势池 {len(cycle_pool)} 只 (基准 {pd.Timestamp(cal[as_of_idx]).date()})")
-
-        segments = {
-            "train": ("2021-01-01", cal[train_end_idx].strftime('%Y-%m-%d')),
-            "valid": (cal[valid_start_idx].strftime('%Y-%m-%d'),
-                      cal[valid_end_idx].strftime('%Y-%m-%d')),
-            "test": (ws_str, we_str),
-        }
-
-        handler_cls = get_trend_handler(hold_days)
-        handler = handler_cls(instruments=cycle_pool,
-                              start_time="2021-01-01",
-                              end_time=segments["test"][1])  # 必须覆盖到 test 段
-        ds = DatasetH(handler=handler, segments=segments)
-        model = LGBModel(**get_trend_model_params())
-        model.fit(ds)
-
-        pred = model.predict(ds, segment="test")
-        if isinstance(pred, pd.Series):
-            pred = pred.to_frame("score")
-        all_predictions.append(pred)
-        print(f"       {ws_str}~{we_str}: {len(pred)} 条信号")
+        print(f"  [{i+1}/{len(week_starts)}] {cycle['ws']}~{cycle['we']}: "
+              f"趋势池 {len(cycle['cycle_pool'])} 只 "
+              f"(基准 {pd.Timestamp(cycle['as_of_date']).date()})")
+        all_predictions.append(cycle["pred"])
+        print(f"       {cycle['ws']}~{cycle['we']}: {len(cycle['pred'])} 条信号")
 
     final_pred = pd.concat(all_predictions)
     final_pred = final_pred[~final_pred.index.duplicated(keep='first')].sort_index()
@@ -449,15 +491,162 @@ def roll_train(test_start, test_end, stock_pool_path, data_path, hold_days=5):
     print(f"\n✅ 趋势滚动训练完成: {len(final_pred)} 条 → {TREND_SIGNAL_FILE}")
 
 
+# ================== 实盘单日预测 ==================
+def predict_day(date_str, stock_pool_path, data_path, hold_days=5, topk=6,
+                use_market_filter=True):
+    """实盘单日推荐: 与 roll 回测同一逻辑 (当周重训 + 每周重筛池 + 回测同款过滤)。
+
+    输出 = backtest_trend 在对应执行日看到的买入候选:
+      - 用"目标日期权威信号所在周"的模型(训练数据只到本周之前, 无前视)
+      - 股票池 = 基础池 + 本周开始时点 filter_by_trend
+      - 过滤 = apply_trend_buy_filter (与回测买入门完全一致)
+      - 大盘<MA20 暂停买入 (与回测 use_market_filter 一致)
+    """
+    _ensure_qlib_init(data_path)
+
+    cal = D.calendar(start_time="2021-01-01", end_time="2027-12-31")
+    target = pd.Timestamp(date_str)
+
+    # 基础候选池: 与 roll 相同口径
+    if stock_pool_path and Path(stock_pool_path).exists():
+        base_pool = load_stock_pool(stock_pool_path)
+        print(f"  📦 基础候选池: {len(base_pool)} 只 (来自 {Path(stock_pool_path).name})")
+    else:
+        base_pool = get_mainboard_universe(
+            cal[0].strftime('%Y-%m-%d'), cal[-1].strftime('%Y-%m-%d'))
+        print(f"  📦 基础候选池: {len(base_pool)} 只 (全主板)")
+
+    # 数据源可能滞后: 回退到最近有特征数据的交易日 (决策基准日 asof)
+    _recent = [d for d in cal if d <= target][-5:]
+    if not _recent:
+        _recent = list(cal)[-5:]
+    asof_date = None
+    for _day in reversed(_recent):
+        _probe = D.features(base_pool[:20], ["$close"], start_time=_day, end_time=_day)
+        if _probe is not None and not _probe.empty:
+            asof_date = _day
+            if _day != target:
+                print(f"⚠️ {date_str} 无特征数据, 回退到 {_day.date()}")
+            break
+    if asof_date is None:
+        print("❌ 无法获取行情数据 (目标日期无特征数据)")
+        return None
+    print(f"\n📈 趋势预测, 决策基准日: {pd.Timestamp(asof_date).date()}")
+
+    # 大盘 MA20 风控 (与回测 use_market_filter 一致): 大盘<MA20 暂停买入
+    if use_market_filter:
+        mkt = D.features(["SH000300"], ["$close", "Mean($close, 20)"],
+                         start_time=asof_date, end_time=asof_date)
+        if mkt is not None and not mkt.empty:
+            row = mkt.iloc[0]
+            if row["$close"] < row["Mean($close, 20)"]:
+                print(f"⚠️ 大盘在 MA20 下方 ({pd.Timestamp(asof_date).date()}), 暂停买入 (与回测一致)")
+                return None
+        else:
+            print("⚠️ 无法获取大盘数据, 跳过 MA20 风控")
+
+    # 定位"权威信号"所在周 (与 roll 一致):
+    # roll 的周测试段为 [周一, 下周一], 周一那天的信号由"上一周模型"产出(dedup keep='first'),
+    # 其余日期由"本周模型"产出。这里复现同样的周归属, 保证 predict 与 roll 信号同源。
+    monday_of = asof_date - pd.Timedelta(days=asof_date.weekday())
+    if asof_date == monday_of:
+        anchor = monday_of - pd.Timedelta(days=7)   # 周一 → 上一周模型
+    else:
+        anchor = monday_of                          # 非周一 → 本周模型
+    next_monday = anchor + pd.Timedelta(days=7)
+
+    cycle = _run_week_cycle(
+        base_pool, anchor, next_monday - pd.Timedelta(days=1),
+        test_end=next_monday, hold_days=hold_days, cal=cal,
+    )
+    if cycle is None:
+        print("❌ 当周无有效训练/预测窗口 (数据不足)")
+        return None
+    pred = cycle["pred"]
+
+    # 取 <= asof 的最新信号 (与回测 'latest signal <= asof' 一致)
+    sig = pred[pred.index.get_level_values("datetime") <= asof_date]
+    if sig.empty:
+        print("❌ 目标日期无可用信号")
+        return None
+    latest_sig_day = sig.index.get_level_values("datetime").max()
+    sig_day = sig[sig.index.get_level_values("datetime") == latest_sig_day]
+    day_scores = sig_day["score"]
+    day_scores.index = sig_day.index.get_level_values("instrument")
+
+    result, n_candidates = apply_trend_buy_filter(
+        day_scores, asof_date=asof_date, topk=topk)
+    if result.empty:
+        print("❌ 过滤后无候选 (当日无符合条件的趋势股)")
+        return None
+
+    result = result.copy()
+    result.index = result.index.astype(str).str.upper().str.strip()
+    result = result.sort_values("score", ascending=False).head(topk)
+    pick_date = pd.Timestamp(asof_date).strftime('%Y-%m-%d')
+
+    print(f"\n✅ 趋势推荐 Top{len(result)} ({pick_date}):")
+    print(result[['score', 'bias_5d', 'bias_20d', 'vol_ratio']].to_string())
+
+    # 保存
+    TREND_PREDICTIONS_DIR.mkdir(parents=True, exist_ok=True)
+    out_csv = TREND_PREDICTIONS_DIR / f"trend_picks_{pick_date}.csv"
+    result[['score', 'bias_5d', 'bias_20d', 'vol_ratio']].to_csv(out_csv)
+    print(f"\n💾 已保存至: {out_csv}")
+
+    # 后端批量保存
+    backend_records = build_backend_records_from_result(result, pick_date)
+    backend_response = save_scores_to_backend(backend_records)
+    if backend_response.get("success"):
+        print(f"📤 后端批量保存成功，计数: {backend_response.get('count', len(backend_records))}")
+    else:
+        print(f"⚠️ 后端批量保存未成功: {backend_response.get('message', 'unknown error')}")
+
+    # 发送邮件报告
+    try:
+        print(f"🔍 配置文件路径: {CONFIG_PATH}")
+        _email_cfg = load_config_from_ini("email", str(CONFIG_PATH))
+        TO_EMAILS = [e.strip() for e in _email_cfg.get("to_emails", "").split(",") if e.strip()] or [_email_cfg.get("to_email", "")]
+        FROM_EMAIL = _email_cfg.get("from_email", "")
+        FROM_PASSWORD = _email_cfg.get("from_password", "")
+        SMTP_SERVER = _email_cfg.get("smtp_server", "smtp.qq.com")
+        SMTP_PORT = int(_email_cfg.get("smtp_port", "587"))
+
+        print(f"📧 邮件配置 - 发件人: {FROM_EMAIL}")
+        print(f"📧 邮件配置 - 收件人: {TO_EMAILS}")
+        print(f"📧 邮件配置 - SMTP: {SMTP_SERVER}:{SMTP_PORT}")
+
+        html_body = generate_trend_report_html(pick_date, result, n_candidates)
+        subject = f"📈 趋势跟踪策略报告 - {pick_date}"
+
+        for to_email in TO_EMAILS:
+            send_email(
+                subject=subject,
+                body=html_body,
+                to_email=to_email,
+                from_email=FROM_EMAIL,
+                from_password=FROM_PASSWORD,
+                smtp_server=SMTP_SERVER,
+                smtp_port=SMTP_PORT,
+                content_type="html"
+            )
+        print("📧 邮件报告已发送成功！")
+    except Exception as e:
+        print(f"❌ 邮件发送失败: {e}")
+
+    return result
+
+
 if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser()
-    parser.add_argument("--mode", type=str, choices=["train", "roll", "predict"], default="predict")
+    parser.add_argument("--mode", type=str, choices=["roll", "predict"], default="predict")
     parser.add_argument("--date", type=str, default=pd.Timestamp.now().strftime('%Y-%m-%d'))
     parser.add_argument("--test_start", type=str, default="2026-02-01")
     parser.add_argument("--test_end", type=str, default="2026-07-20")
     parser.add_argument("--hold_days", type=int, default=5)
     parser.add_argument("--topk", type=int, default=6)
+    parser.add_argument("--market-filter", type=int, default=1, help="大盘MA20风控(1开0关, 与回测一致)")
     args = parser.parse_args()
 
     if args.mode == "roll":
@@ -465,138 +654,7 @@ if __name__ == "__main__":
         # roll 内部每周按当时行情重新趋势选股; 若文件不存在则自动退回全主板候选。
         roll_train(args.test_start, args.test_end, BASE_POOL, DATA_PATH, args.hold_days)
     elif args.mode == "predict":
-        # ===== 单日预测模式 =====
-        _ensure_qlib_init()
-        stock_in = load_stock_pool(TREND_POOL)
-        # 数据源可能滞后: 指定日期未必已入库(如日期在日历中但特征数据缺失)。
-        # 回退到最近有特征数据的交易日, 避免取空数据导致推荐失效。
-        _cal = D.calendar()
-        _target = pd.Timestamp(args.date)
-        _recent = [d for d in _cal if d <= _target][-5:]
-        if not _recent:
-            _recent = list(_cal)[-5:]
-        for _day in reversed(_recent):
-            _probe = D.features(stock_in[:20], ["$close"], start_time=_day, end_time=_day)
-            if _probe is not None and not _probe.empty:
-                if _day != _target:
-                    print(f"⚠️ {args.date} 无特征数据, 回退到 {_day.date()}")
-                args.date = _day.strftime('%Y-%m-%d')
-                break
-        print(f"\n📈 趋势预测 ({args.date}), 股票池: {len(stock_in)} 只")
-
-        if not TREND_MODEL_FILE.exists():
-            print("❌ 模型不存在，请先训练: python trend_strategy.py --mode=train")
-        else:
-            model = LGBModel.load(TREND_MODEL_FILE)
-            feat_conf = None
-            if TREND_FEATURE_FILE.exists():
-                with open(TREND_FEATURE_FILE, 'r') as f:
-                    feat_conf = json.load(f)
-
-            lookback = (pd.Timestamp(args.date) - pd.Timedelta(days=120)).strftime('%Y-%m-%d')
-            # 特征配置必须与训练时一致：有 feat_conf 用精炼后的，否则用全量 Alpha158
-            handler_cls = get_trend_handler(
-                args.hold_days,
-                feat_conf['fields'] if feat_conf else None,
-                feat_conf['names'] if feat_conf else None
-            )
-            handler = handler_cls(instruments=stock_in, start_time=lookback, end_time=args.date)
-            ds = DatasetH(handler=handler, segments={"test": (args.date, args.date)})
-
-            pred = model.predict(ds, segment="test")
-            if isinstance(pred, pd.Series):
-                pred = pred.to_frame("score")
-            scores = pred.reset_index()
-            scores = scores[scores['datetime'] == pd.Timestamp(args.date)].copy()
-            scores['instrument'] = scores['instrument'].astype(str).str.upper().str.strip()
-            scores = scores.set_index('instrument')
-
-            # 行情风控: D.features 获取当天的乖离、量比、上影线
-            # 含真实日涨幅(ret_real, 用 factor 还原实际价), 用于剔除涨停/一字板
-            risk_fields = [
-                "$close / Mean($close, 5) - 1",
-                "$close / Mean($close, 20) - 1",
-                "$amount / Mean($amount, 5)",
-                "($high - $close) / $close",
-                "($close / Ref($close, 1)) * (Ref($factor, 1) / $factor) - 1",
-            ]
-            risk_names = ["bias_5d", "bias_20d", "vol_ratio", "upper_shadow", "ret_real"]
-            risk_df = D.features(stock_in, risk_fields, start_time=args.date, end_time=args.date)
-            if not risk_df.empty:
-                risk_df.columns = risk_names
-                try:
-                    risk_df = risk_df.xs(pd.Timestamp(args.date), level='datetime')
-                except KeyError:
-                    risk_df = risk_df.xs(pd.Timestamp(args.date), level=1)
-                risk_df.index = risk_df.index.astype(str).str.upper().str.strip()
-
-                final = scores[['score']].join(risk_df[['bias_5d', 'bias_20d', 'vol_ratio', 'ret_real']], how='inner')
-                # 剔除无法买入的标的: 当日收盘涨停/一字板(次日开盘大概率顶一字, 买不进)
-                _lim = final.index.map(_limit_up_threshold)
-                _lim = pd.Series(_lim.values, index=final.index)
-                final = final[final['ret_real'] < (_lim - 0.002)]
-                # 趋势筛选：5日乖离为正（多头）+ 放量确认（1.2~5倍均量，剔除无量跟风和极端爆量）
-                candidates = final[(final['bias_5d'] > 0) & (final['vol_ratio'] > 1.2) & (final['vol_ratio'] < 5.0)]
-                result = candidates.sort_values('score', ascending=False).head(args.topk)
-
-                print(f"\n✅ 趋势推荐 Top{args.topk} ({args.date}):")
-                print(result[['score', 'bias_5d', 'bias_20d', 'vol_ratio']].to_string())
-
-                # 保存
-                TREND_PREDICTIONS_DIR.mkdir(parents=True, exist_ok=True)
-                result.to_csv(TREND_PREDICTIONS_DIR / f"trend_picks_{args.date}.csv")
-                print(f"\n💾 已保存至: {TREND_PREDICTIONS_DIR / f'trend_picks_{args.date}.csv'}")
-
-                # 后端批量保存
-                backend_records = build_backend_records_from_result(result, args.date)
-                backend_response = save_scores_to_backend(backend_records)
-                if backend_response.get("success"):
-                    print(f"📤 后端批量保存成功，计数: {backend_response.get('count', len(backend_records))}")
-                else:
-                    print(f"⚠️ 后端批量保存未成功: {backend_response.get('message', 'unknown error')}")
-
-                # 发送邮件报告
-                try:
-                    print(f"🔍 配置文件路径: {CONFIG_PATH}")
-                    _email_cfg = load_config_from_ini("email", str(CONFIG_PATH))
-                    TO_EMAILS = [e.strip() for e in _email_cfg.get("to_emails", "").split(",") if e.strip()] or [_email_cfg.get("to_email", "")]
-                    FROM_EMAIL = _email_cfg.get("from_email", "")
-                    FROM_PASSWORD = _email_cfg.get("from_password", "")
-                    SMTP_SERVER = _email_cfg.get("smtp_server", "smtp.qq.com")
-                    SMTP_PORT = int(_email_cfg.get("smtp_port", "587"))
-
-                    print(f"📧 邮件配置 - 发件人: {FROM_EMAIL}")
-                    print(f"📧 邮件配置 - 收件人: {TO_EMAILS}")
-                    print(f"📧 邮件配置 - SMTP: {SMTP_SERVER}:{SMTP_PORT}")
-
-                    # 生成 HTML 报告
-                    html_body = generate_trend_report_html(args.date, result, len(final))
-
-                    subject = f"📈 趋势跟踪策略报告 - {args.date}"
-
-                    for to_email in TO_EMAILS:
-                        send_email(
-                            subject=subject,
-                            body=html_body,
-                            to_email=to_email,
-                            from_email=FROM_EMAIL,
-                            from_password=FROM_PASSWORD,
-                            smtp_server=SMTP_SERVER,
-                            smtp_port=SMTP_PORT,
-                            content_type="html"
-                        )
-                    print("📧 邮件报告已发送成功！")
-                except Exception as e:
-                    print(f"❌ 邮件发送失败: {e}")
-            else:
-                print("❌ 无法获取行情数据")
-                print(f"   说明: qlib D.features 返回空数据；risk_df.shape={risk_df.shape}")
-                print("   可能原因: 该日期在当前数据源中缺少行情，或股票池当天无可用标的。")
-    else:
-        # train mode
-        test_pred, model = train_once(
-            args.test_start, args.test_end, TREND_POOL, DATA_PATH, args.hold_days
-        )
-        test_pred.to_pickle(str(TREND_SIGNAL_FILE))
-        model.to_pickle(str(TREND_MODEL_FILE))
-        print(f"\n✅ 模型和信号已保存")
+        # ===== 单日预测模式: 与 roll 回测同一逻辑 =====
+        # 每次运行训练"目标日期权威信号所在周"的模型(训练数据只到本周之前), 无前视。
+        predict_day(args.date, BASE_POOL, DATA_PATH, args.hold_days, args.topk,
+                    use_market_filter=bool(args.market_filter))
