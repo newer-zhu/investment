@@ -51,8 +51,9 @@ TREND_RULES = {
     "trend_exit_ma": 10,
     "trend_exit_buffer": 0.01,
     "trend_break_min_hold": 2,
-    "use_market_filter": True,
-    "market_exit": True,
+    # MA20 风控已关闭(仅提醒, 不暂停买入/清仓)
+    "use_market_filter": False,
+    "market_exit": False,
     "signal_max_age": 10,
     "min_price": 1.0,
     "vol_ratio_max": 1.5,

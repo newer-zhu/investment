@@ -21,7 +21,8 @@ for i in 1 2 3; do
 done
 if [ "$ok" -eq 1 ]; then
   echo "[$(date '+%F %T')] 数据更新完成" >> "$LOG"
+  exit 0
 else
-  echo "[$(date '+%F %T')] ❌ 数据更新失败 (已重试3次), 继续跑 predict 用现有数据" >> "$LOG"
+  echo "[$(date '+%F %T')] ❌ 数据更新失败 (已重试3次), 返回非0让 pipeline 跳过本次 predict" >> "$LOG"
+  exit 1
 fi
-exit 0

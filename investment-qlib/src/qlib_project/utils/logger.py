@@ -8,8 +8,11 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
+# 项目根 (investment-qlib/); 日志目录用绝对路径, 避免被 launchd/cron 的 cwd(=/) 影响而报只读
+_PROJECT_ROOT = Path(__file__).resolve().parents[3]
 
-def setup_logger(name: str = "investment", log_dir: str = "logs", level: int = logging.INFO) -> logging.Logger:
+
+def setup_logger(name: str = "investment", log_dir: str = None, level: int = logging.INFO) -> logging.Logger:
     """
     设置标准化的日志记录器
     
@@ -29,9 +32,9 @@ def setup_logger(name: str = "investment", log_dir: str = "logs", level: int = l
     
     logger.setLevel(level)
     
-    # 创建日志目录
-    log_path = Path(log_dir)
-    log_path.mkdir(exist_ok=True)
+    # 创建日志目录 (默认绝对路径 investment-qlib/logs)
+    log_path = Path(log_dir) if log_dir else (_PROJECT_ROOT / "logs")
+    log_path.mkdir(exist_ok=True, parents=True)
     
     # 统一的日志格式
     # 格式: [时间] [级别] [模块] 消息

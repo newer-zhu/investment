@@ -157,7 +157,9 @@ def build_daily_guidance(asof_date, market_ok=None, buy_result=None, rules=None)
         codes = [h["code"] for h in holdings]
         feats = _features_single_day(
             codes,
-            ["$close",
+            # price 取真实价: qlib 的 $close 是复权价, 真实价 = $close / $factor
+            # (用户记录的 entry_price 是真实买入价, 盈亏/现价/触发价都须用真实价对齐)
+            ["$close / $factor",
              "$close / Mean($close, 5) - 1",
              "$close / Mean($close, 10) - 1"],
             asof_ts,
@@ -241,7 +243,7 @@ def main():
     # status
     g = build_daily_guidance(args.date)
     print(f"决策基准日: {g['asof_date']}")
-    mkt = "🟢 健康" if g["market_ok"] else "🔴 风险 (暂停买入 + 全仓离场)"
+    mkt = "🟢 健康" if g["market_ok"] else "🔴 风险 (提醒: 大盘在 MA20 下方)"
     mkt_v = f"HS300={g['market_close']} MA20={g['market_ma20']}" if g["market_close"] is not None else ""
     print(f"大盘: {mkt}  {mkt_v}")
     print(f"持仓 {len(g['holdings'])} 只:")

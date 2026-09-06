@@ -252,7 +252,7 @@ def _render_operation_guidance(g) -> str:
         return ""
 
     mkt_ok = g.get("market_ok", True)
-    mkt_txt = "🟢 大盘健康(MA20 上方)" if mkt_ok else "🔴 大盘风险(MA20 下方): 暂停买入 + 全仓离场"
+    mkt_txt = "🟢 大盘在 MA20 上方" if mkt_ok else "🔴 大盘在 MA20 下方 (风险提醒, 仅供参考)"
     if g.get("market_close") is not None:
         mkt_txt += f"　HS300 {g['market_close']:.2f} / MA20 {g['market_ma20']:.2f}"
     mkt_color = "#27ae60" if mkt_ok else "#e74c3c"
@@ -295,7 +295,7 @@ def _render_operation_guidance(g) -> str:
     elif mkt_ok:
         buy_note = "<p style='color:#7f8c8d;'>今日过滤后无符合买入条件的候选, 保持空仓/观察。</p>"
     else:
-        buy_note = "<p style='color:#e74c3c;'>⚠️ 大盘在 MA20 下方, 暂停买入。</p>"
+        buy_note = "<p style='color:#e74c3c;'>⚠️ 大盘在 MA20 下方 (风险提醒, 仅供参考)。</p>"
 
     return f"""
     <div class="summary">
