@@ -9,6 +9,14 @@ mkdir -p "$LOG_DIR"
 LOG="$LOG_DIR/daily_data_update_$(date +%Y%m%d).log"
 
 echo "[$(date '+%F %T')] 数据更新开始 (容器 $CONTAINER)" >> "$LOG"
+
+# ---- 跑前清理 (2026-09-07 修复) ----
+# dump_qlib_bin.sh 用 `dolt sql-server &` 后台起服务且从不清理, 上次运行残留的 server
+# 会占 3306 / /tmp/mysql.sock, 并让下次新起的 sql-server 读到旧库 → "table not found"
+# (表现: 手动跑能成、定时 09:18 跑必失败)。这里先杀掉残留 dolt 进程 + 删陈旧 socket。
+echo "[$(date '+%F %T')] 清理上次残留的 dolt sql-server / 陈旧 socket" >> "$LOG"
+docker exec "$CONTAINER" bash -c 'pkill -f "dolt sql-server" 2>/dev/null; pkill -x dolt 2>/dev/null; sleep 2; rm -f /tmp/mysql.sock 2>/dev/null; true' >> "$LOG" 2>&1
+
 # Docker Desktop 唤醒后可能未就绪: 重试最多 3 次, 每次间隔 30s
 ok=0
 for i in 1 2 3; do

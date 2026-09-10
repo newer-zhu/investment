@@ -463,11 +463,11 @@ def roll_train(test_start, test_end, stock_pool_path, data_path, hold_days=5):
     # 每个周期在此候选内按"该周期开始时点"的行情重新做趋势筛选 → 模拟实盘每周刷新股票池。
     if stock_pool_path and Path(stock_pool_path).exists():
         base_pool = load_stock_pool(stock_pool_path)
-        print(f"  📦 基础候选池: {len(base_pool)} 只 (来自 {Path(stock_pool_path).name})")
+        print(f"  📦 候选基础池: {len(base_pool)} 只 (来自 {Path(stock_pool_path).name})")
     else:
         base_pool = get_mainboard_universe(
             cal[0].strftime('%Y-%m-%d'), cal[-1].strftime('%Y-%m-%d'))
-        print(f"  📦 基础候选池: {len(base_pool)} 只 (全主板)")
+        print(f"  📦 候选基础池: {len(base_pool)} 只 (全主板; 基础池文件缺失 → 仅选股候选)")
 
     for i, ws in enumerate(week_starts):
         if i + 1 < len(week_starts):
@@ -541,14 +541,14 @@ def predict_day(date_str, stock_pool_path, data_path, hold_days=5, topk=6,
     cal = D.calendar(start_time="2021-01-01", end_time="2027-12-31")
     target = pd.Timestamp(date_str)
 
-    # 基础候选池: 与 roll 相同口径
+    # 基础候选池: 与 roll 相同口径 (仅选股候选, 训练/预测范围见下方"当周趋势池")
     if stock_pool_path and Path(stock_pool_path).exists():
         base_pool = load_stock_pool(stock_pool_path)
-        print(f"  📦 基础候选池: {len(base_pool)} 只 (来自 {Path(stock_pool_path).name})")
+        print(f"  📦 候选基础池: {len(base_pool)} 只 (来自 {Path(stock_pool_path).name})")
     else:
         base_pool = get_mainboard_universe(
             cal[0].strftime('%Y-%m-%d'), cal[-1].strftime('%Y-%m-%d'))
-        print(f"  📦 基础候选池: {len(base_pool)} 只 (全主板)")
+        print(f"  📦 候选基础池: {len(base_pool)} 只 (全主板; my_base_pool.txt 缺失 → 仅选股候选)")
 
     # 数据源可能滞后: 回退到最近有特征数据的交易日 (决策基准日 asof)
     _recent = [d for d in cal if d <= target][-5:]
@@ -603,6 +603,9 @@ def predict_day(date_str, stock_pool_path, data_path, hold_days=5, topk=6,
         print("❌ 当周无有效训练/预测窗口 (数据不足)")
         return None
     pred = cycle["pred"]
+    print(f"  🎯 当周趋势池: {len(cycle['cycle_pool'])} 只 "
+          f"(锚定周 {cycle['ws']}~{cycle['we']}, "
+          f"基准 {pd.Timestamp(cycle['as_of_date']).date()})")
 
     # 取 <= asof 的最新信号 (与回测 'latest signal <= asof' 一致)
     sig = pred[pred.index.get_level_values("datetime") <= asof_date]
